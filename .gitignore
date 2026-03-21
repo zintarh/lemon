@@ -1,0 +1,23 @@
+# Environment files — never commit secrets
+.env
+.env.local
+.env.production
+.env.*.local
+
+# Dependencies
+node_modules/
+
+# Build outputs
+.next/
+dist/
+build/
+artifacts/
+cache/
+typechain-types/
+
+# Misc
+.DS_Store
+*.log
+deployments.json
+.claude/
+.mcp.json

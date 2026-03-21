@@ -1,0 +1,25 @@
+{
+  "name": "@lemon/agent",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node --no-deprecation --import tsx/esm --watch src/index.ts",
+    "start": "node --no-deprecation --import tsx/esm src/index.ts",
+    "build": "tsc",
+    "test:e2e": "tsx test/e2e.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.80.0",
+    "@fal-ai/client": "^1.9.4",
+    "axios": "^1.7.0",
+    "dotenv": "^16.4.0",
+    "openai": "^4.67.0",
+    "viem": "^2.21.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.4.0"
+  }
+}
