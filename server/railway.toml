@@ -1,5 +1,6 @@
 [build]
-builder = "nixpacks"
+builder = "dockerfile"
+dockerfilePath = "Dockerfile.server"
 
 [deploy]
 startCommand = "node server/dist/index.js"
