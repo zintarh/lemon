@@ -1344,6 +1344,7 @@ function HistoryPanel({
   const SERVER_URL = process.env.NEXT_PUBLIC_SERVER_URL ?? "http://localhost:4000";
 
   useEffect(() => {
+    if (!myAddress) return;
     fetch(`${SERVER_URL}/api/contact/${myAddress}`)
       .then(r => r.json())
       .then(d => setHasRevealInfo(!!(d.telegram_handle || d.email || d.phone)))
@@ -1351,6 +1352,7 @@ function HistoryPanel({
   }, [myAddress, SERVER_URL]);
 
   useEffect(() => {
+    if (!myAddress) return;
     fetch(`${SERVER_URL}/api/agents/${myAddress}`)
       .then(r => r.json())
       .then(d => {
@@ -1581,14 +1583,16 @@ export default function DashboardPage() {
 
   if (!authenticated) return <NotConnected />;
 
+  // Wallet address still resolving — don't render with zero address
+  if (!address) return null;
+
   // Redirect to onboard if wallet connected but agent not registered
-  if (authenticated && address && !regLoading && isRegistered === false) {
+  if (!regLoading && isRegistered === false) {
     router.replace("/onboard");
     return null;
   }
 
-  // address is guaranteed here because authenticated + registered implies wallet connected
-  const myAddress = address ?? "0x0000000000000000000000000000000000000000" as Address;
+  const myAddress = address;
 
   const sharedHistoryProps = {
     dateIds: allDateIds,
