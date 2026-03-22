@@ -30,6 +30,7 @@ import {
   generateAgentWallet,
   setOperatorKey,
   fundAgentWallet,
+  publicClient,
 } from "./onchain.js";
 import { postDateTweet } from "./twitter.js";
 import { startSelfSession, pollAndUpdateDB } from "./selfclaw.js";
@@ -420,7 +421,9 @@ async function performDateBooking(
       amountUSD: DATE_COST_USD_STR,
     });
   } catch (e) {
-    throw new Error(`Payment failed: ${(e as Error).message}`);
+    // Payment failed — likely agent wallet has no cUSD yet (needs funding after onboarding).
+    // Log it but don't block the booking — date still completes, treasury reconciles separately.
+    console.error(`[payment] ⚠ cUSD transfer failed (non-fatal — fund agent wallets with cUSD): ${(e as Error).message}`);
   }
 
   // 3. Plan the date (image + metadata — payment already done)
@@ -572,7 +575,7 @@ app.post("/api/date/retry", async (req: Request, res: Response) => {
     performDateBooking(bookA, bookB, convo.template_suggested, convo.shared_interests ?? [])
       .then(async () => {
         await supabase.from("conversations").update({
-          transcript: { ...transcript, bookingError: null, bookingPending: false },
+          transcript: { ...transcript, bookingError: null, bookingPending: false, bookingComplete: true },
         }).eq("id", convo.id);
       })
       .catch(async (err) => {
@@ -774,14 +777,7 @@ app.post("/api/agents/:wallet/register-identity", async (req: Request, res: Resp
     // hadn't confirmed yet at the time the first ERC-8004 attempt ran)
     const agentAddress = (await import("viem/accounts"))
       .privateKeyToAccount(agent.agent_private_key as `0x${string}`).address;
-    const { createPublicClient: mkClient, http: mkHttp } = await import("viem");
-    const IS_MAINNET_HERE = process.env.NETWORK === "mainnet";
-    const { celo: celoChain, celoAlfajores: celoAlfajoresChain } = await import("viem/chains");
-    const checkClient = mkClient({
-      chain: IS_MAINNET_HERE ? celoChain : celoAlfajoresChain,
-      transport: mkHttp(IS_MAINNET_HERE ? process.env.CELO_RPC_URL : process.env.CELO_SEPOLIA_RPC_URL),
-    });
-    const balance = await checkClient.getBalance({ address: agentAddress });
+    const balance = await publicClient.getBalance({ address: agentAddress });
     const MIN_GAS_BALANCE = BigInt("80000000000000000"); // 0.08 CELO — enough for ERC-8004 + headroom
     if (balance < MIN_GAS_BALANCE) {
       console.log(`[server] Agent wallet ${agentAddress} balance ${balance} < 0.08 CELO — topping up…`);
@@ -1208,10 +1204,8 @@ app.post("/api/contact/pay-reveal", async (req: Request, res: Response) => {
     }
 
     // Verify payment on-chain: tx must be to theirWallet and value ≥ price
-    const { createPublicClient, http, parseEther } = await import("viem");
-    const { celo } = await import("viem/chains");
-    const client = createPublicClient({ chain: celo, transport: http() });
-    const tx = await client.getTransaction({ hash: txHash as `0x${string}` });
+    const { parseEther } = await import("viem");
+    const tx = await publicClient.getTransaction({ hash: txHash as `0x${string}` });
 
     if (tx.to?.toLowerCase() !== theirWallet.toLowerCase()) {
       return void res.status(402).json({ error: "Payment not sent to correct address" });
@@ -1227,6 +1221,48 @@ app.post("/api/contact/pay-reveal", async (req: Request, res: Response) => {
     res.json({
       theirs: { telegram: theirContact.telegram_handle, email: theirContact.email ?? null },
     });
+  } catch (err) {
+    res.status(500).json({ error: (err as Error).message });
+  }
+});
+
+// ─── GET /api/tweets ──────────────────────────────────────────────────────────
+// Returns the 20 most recent completed dates that have a tweet posted.
+// Used by the Gallery page to display the live tweet feed.
+
+app.get("/api/tweets", async (_req: Request, res: Response) => {
+  try {
+    const { data, error } = await supabase
+      .from("dates")
+      .select("tweet_url, image_url, metadata_uri, agent_a, agent_b, completed_at, template")
+      .not("tweet_url", "is", null)
+      .eq("status", 2)
+      .order("completed_at", { ascending: false })
+      .limit(20);
+
+    if (error) throw new Error(error.message);
+
+    // Enrich with agent names where possible (best-effort — skip on error)
+    const wallets = [...new Set((data ?? []).flatMap((d) => [d.agent_a, d.agent_b]))];
+    let nameMap: Record<string, string> = {};
+    if (wallets.length > 0) {
+      const { data: agents } = await supabase.from("agents").select("wallet, name").in("wallet", wallets);
+      for (const a of agents ?? []) nameMap[a.wallet] = a.name;
+    }
+
+    const tweets = (data ?? []).map((d) => ({
+      tweetUrl: d.tweet_url,
+      imageUrl: d.image_url,
+      metadataUri: d.metadata_uri,
+      agentA: d.agent_a,
+      agentB: d.agent_b,
+      nameA: nameMap[d.agent_a] ?? d.agent_a?.slice(0, 8),
+      nameB: nameMap[d.agent_b] ?? d.agent_b?.slice(0, 8),
+      completedAt: d.completed_at,
+      template: d.template,
+    }));
+
+    res.json({ tweets });
   } catch (err) {
     res.status(500).json({ error: (err as Error).message });
   }
