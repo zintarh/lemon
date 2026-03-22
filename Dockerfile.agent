@@ -7,8 +7,5 @@ COPY . .
 # Install with full workspace context (all package.json files present)
 RUN npm install
 
-# Build agent workspace
-RUN npm run build --workspace=@lemon/agent
-
 EXPOSE 8080
-CMD ["node", "agent/dist/index.js"]
+CMD ["node", "--no-deprecation", "--import", "tsx/esm", "agent/src/index.ts"]

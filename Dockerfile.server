@@ -7,8 +7,5 @@ COPY . .
 # Install with full workspace context (all package.json files present)
 RUN npm install
 
-# Build server workspace
-RUN npm run build --workspace=@lemon/server
-
 EXPOSE 3000
-CMD ["node", "server/dist/index.js"]
+CMD ["node", "--no-deprecation", "--import", "tsx/esm", "server/src/index.ts"]
