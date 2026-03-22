@@ -377,8 +377,8 @@ function VoiceOnboardingModal({
   const progressPct = ((qIndex + (phase === "processing" ? 1 : 0)) / VOICE_QUESTIONS.length) * 100;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-[6px] p-4">
-      <div className="relative bg-[#FAFAF8] rounded-[28px] shadow-[0_24px_80px_rgba(0,0,0,0.25)] max-w-[460px] w-full px-8 py-8 flex flex-col gap-5">
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/60 backdrop-blur-[6px] p-0 sm:p-4">
+      <div className="relative bg-[#FAFAF8] rounded-t-[28px] sm:rounded-[28px] shadow-[0_24px_80px_rgba(0,0,0,0.25)] max-w-[460px] w-full px-5 py-6 sm:px-8 sm:py-8 flex flex-col gap-5">
 
         {/* Close */}
         <button
@@ -920,8 +920,8 @@ export default function OnboardPage() {
       </div>
 
       {/* Cards grid — fills remaining space */}
-      <div className="flex-1 min-h-0 px-[clamp(12px,2.5vw,36px)]">
-        <div className="grid grid-cols-3 gap-[clamp(8px,1.2vw,16px)] h-full">
+      <div className="flex-1 min-h-0 px-[clamp(12px,2.5vw,36px)] overflow-y-auto sm:overflow-hidden">
+        <div className="grid grid-cols-2 sm:grid-cols-3 gap-[clamp(8px,1.2vw,16px)] h-full sm:h-full pb-2 sm:pb-0" style={{ gridAutoRows: "minmax(140px,1fr)" }}>
           {TEMPLATES.map(t => (
             <TemplateCard key={t.id} t={t} selected={selectedId === t.id} onClick={() => selectTemplate(t.id)} />
           ))}
@@ -961,8 +961,8 @@ export default function OnboardPage() {
       {/* Main area */}
       <div className="flex-1 min-h-0 flex">
 
-        {/* Sidebar */}
-        <aside className="shrink-0 border-r border-black/[0.06] flex flex-col gap-[clamp(6px,1vh,12px)] w-[clamp(150px,18vw,210px)] px-[clamp(10px,1.5vw,18px)] py-[clamp(16px,2.5vh,28px)]">
+        {/* Sidebar — hidden on mobile, visible md+ */}
+        <aside className="hidden md:flex shrink-0 border-r border-black/[0.06] flex-col gap-[clamp(6px,1vh,12px)] w-[clamp(150px,18vw,210px)] px-[clamp(10px,1.5vw,18px)] py-[clamp(16px,2.5vh,28px)]">
           {/* Template thumbnail */}
           <div className="rounded-xl overflow-hidden mb-[clamp(8px,1.5vh,16px)] shadow-[0_3px_14px_rgba(0,0,0,0.10)]">
             <div
@@ -1023,6 +1023,38 @@ export default function OnboardPage() {
 
         {/* Content */}
         <main className="flex-1 min-w-0 flex flex-col gap-[clamp(8px,1.4vh,14px)] overflow-y-auto px-[clamp(16px,3vw,44px)] py-[clamp(16px,2.5vh,32px)]">
+
+          {/* Mobile step indicator — only visible below md */}
+          <div className="md:hidden shrink-0 flex items-center gap-3 mb-1">
+            {subStepMeta.map((s, i) => {
+              const isDone = subStep > i;
+              const isActive = subStep === i;
+              return (
+                <button
+                  key={s.n}
+                  type="button"
+                  onClick={() => setSubStep(i)}
+                  className={[
+                    "flex items-center gap-2 rounded-xl px-3 py-1.5 text-left border-none cursor-pointer transition-colors",
+                    isActive ? "bg-[#D6820A]/10" : "bg-transparent",
+                  ].join(" ")}
+                >
+                  <div className={[
+                    "w-5 h-5 rounded-full flex items-center justify-center text-[9px] font-extrabold shrink-0",
+                    isDone ? "bg-green-600 text-white" : isActive ? "bg-[#D6820A] text-white" : "bg-[#E6DDD0] text-[#1a1206]/30",
+                  ].join(" ")}>
+                    {isDone ? "✓" : s.n}
+                  </div>
+                  <span className={[
+                    "text-[11px] font-bold",
+                    isActive ? "text-[#92400e]" : isDone ? "text-green-600" : "text-[#1a1206]/35",
+                  ].join(" ")}>
+                    {s.title}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
 
           {/* Sub-step label */}
           <div className="shrink-0">

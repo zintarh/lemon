@@ -3,9 +3,10 @@
 import { useEffect, useState, useCallback } from "react";
 import { usePrivy } from "@privy-io/react-auth";
 import { useAccount, useReadContracts } from "wagmi";
+import { useRouter } from "next/navigation";
 import { ConnectButton } from "@/components/ConnectButton";
 import { LemonPulseLoader } from "@/components/LemonPulseLoader";
-import { useAgentProfile } from "@/hooks/useAgentProfile";
+import { useAgentProfile, useIsRegistered } from "@/hooks/useAgentProfile";
 import { useAgentDates, useDateRecord } from "@/hooks/useDates";
 import {
   DATE_TEMPLATE_LABELS,
@@ -737,12 +738,23 @@ function IdlePanel({ name }: { name?: string }) {
   async function triggerMatch() {
     setChecking(true);
     try {
-      await fetch("/api/match/run", { method: "POST" });
+      const res = await fetch("/api/match/run", { method: "POST" });
       setLastChecked(new Date());
-      // Refresh pool status after triggering a match
+      if (res.ok) {
+        const data = await res.json().catch(() => ({}));
+        const matched = (data as { matched?: number }).matched ?? 0;
+        if (matched > 0) {
+          toast.success(`Matched! Starting ${matched} date${matched !== 1 ? "s" : ""}…`);
+        } else {
+          toast.info("No new matches right now — check back in a few minutes.");
+        }
+      }
+      // Refresh pool status
       const r = await fetch(`${SERVER}/api/agents/pool-status`);
       if (r.ok) setPool(await r.json());
-    } catch {}
+    } catch {
+      toast.error("Could not reach the matching server.");
+    }
     setChecking(false);
   }
 
@@ -770,11 +782,11 @@ function IdlePanel({ name }: { name?: string }) {
 
   // Determine which state to show
   const { total = 0, available = 0 } = pool ?? {};
-  const othersAvailable = available - 1; // exclude self
+  const othersAvailable = Math.max(0, available - 1); // exclude self, floor at 0
 
-  type IdleState = "no-agents" | "only-you" | "looking";
+  type IdleState = "loading" | "no-agents" | "only-you" | "looking";
   const state: IdleState = !pool
-    ? "looking"
+    ? "loading"
     : total <= 1
     ? "no-agents"
     : othersAvailable <= 0
@@ -782,6 +794,12 @@ function IdlePanel({ name }: { name?: string }) {
     : "looking";
 
   const content: Record<IdleState, { emoji: string; title: string; subtitle: string; showButton: boolean }> = {
+    "loading": {
+      emoji: "🍋",
+      title: "Checking the pool…",
+      subtitle: "Fetching live pool status.",
+      showButton: false,
+    },
     "no-agents": {
       emoji: "🍋",
       title: "You're the first one here!",
@@ -1242,7 +1260,7 @@ function SetupRevealCard({ myAddress }: { myAddress: Address }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           wallet: myAddress,
-          telegram_handle: telegram.replace("@", ""),
+          telegram_handle: telegram.replace(/^@+/, ""),
           email: "", phone: "",
           reveal_price_cents: parseInt(price) || 150,
         }),
@@ -1471,8 +1489,10 @@ function NotConnected() {
 // ── Page ──────────────────────────────────────────────────────────────────────
 
 export default function DashboardPage() {
+  const router = useRouter();
   const { authenticated } = usePrivy();
   const { address } = useAccount();
+  const { data: isRegistered, isLoading: regLoading } = useIsRegistered(address);
   const { data: profile } = useAgentProfile(address);
   const { data: dateIds } = useAgentDates(address);
   const allDateIds = (dateIds as bigint[] | undefined) ?? [];
@@ -1561,9 +1581,18 @@ export default function DashboardPage() {
 
   if (!authenticated) return <NotConnected />;
 
+  // Redirect to onboard if wallet connected but agent not registered
+  if (authenticated && address && !regLoading && isRegistered === false) {
+    router.replace("/onboard");
+    return null;
+  }
+
+  // address is guaranteed here because authenticated + registered implies wallet connected
+  const myAddress = address ?? "0x0000000000000000000000000000000000000000" as Address;
+
   const sharedHistoryProps = {
     dateIds: allDateIds,
-    myAddress: address!,
+    myAddress,
     stats: agentStats,
     partnerAddresses,
   };
@@ -1577,7 +1606,7 @@ export default function DashboardPage() {
         {/* Left: active date / idle */}
         <div className="flex flex-1 flex-col rounded-3xl border border-[rgba(0,0,0,0.06)] bg-white p-5 shadow-[0_4px_24px_rgba(0,0,0,0.05)]" style={{ maxHeight: "calc(100vh - 72px - 48px)", overflow: "hidden" }}>
           {activeDateId !== undefined ? (
-            <ActiveDatePanel dateId={activeDateId} myAddress={address!} />
+            <ActiveDatePanel dateId={activeDateId} myAddress={myAddress} />
           ) : liveConvo ? (
             <LiveConversationPanel
               convo={liveConvo}
@@ -1585,7 +1614,7 @@ export default function DashboardPage() {
               nameB={livePartnerProfile?.name ?? liveConvo.wallet_b.slice(0, 6)}
               avatarA={resolveAvatar(profile?.avatarURI)}
               avatarB={resolveAvatar(livePartnerProfile?.avatarURI)}
-              myAddress={address}
+              myAddress={myAddress}
             />
           ) : (
             <IdlePanel name={profile?.name} />
@@ -1625,7 +1654,7 @@ export default function DashboardPage() {
           <TabsContent value="live">
             <div className="min-h-[520px] rounded-3xl border border-[rgba(0,0,0,0.06)] bg-white p-5 shadow-[0_4px_24px_rgba(0,0,0,0.05)]">
               {activeDateId !== undefined ? (
-                <ActiveDatePanel dateId={activeDateId} myAddress={address!} />
+                <ActiveDatePanel dateId={activeDateId} myAddress={myAddress} />
               ) : liveConvo ? (
                 <LiveConversationPanel
                   convo={liveConvo}
@@ -1633,7 +1662,7 @@ export default function DashboardPage() {
                   nameB={livePartnerProfile?.name ?? liveConvo.wallet_b.slice(0, 6)}
                   avatarA={resolveAvatar(profile?.avatarURI)}
                   avatarB={resolveAvatar(livePartnerProfile?.avatarURI)}
-                  myAddress={address}
+                  myAddress={myAddress}
                 />
               ) : (
                 <IdlePanel name={profile?.name} />

@@ -11,8 +11,6 @@ export default function Home() {
   const { address } = useAccount();
   const { data: isRegistered } = useIsRegistered(address);
 
-  const ctaHref = !authenticated ? undefined : isRegistered ? "/dashboard" : "/onboard";
-
   return (
     <section className="relative min-h-[100svh] overflow-hidden bg-black">
       <img
@@ -23,17 +21,18 @@ export default function Home() {
 
       <div className="absolute inset-0 z-[1] [background:radial-gradient(ellipse_80%_70%_at_50%_50%,rgba(0,0,0,0.72)_0%,rgba(0,0,0,0.90)_60%,rgba(0,0,0,0.97)_100%)]" />
 
-      <nav className="absolute left-0 right-0 top-0 z-10 flex items-center justify-between px-8 py-5">
+      <nav className="absolute left-0 right-0 top-0 z-10 flex items-center justify-between px-5 py-4 sm:px-8 sm:py-5">
         <Link href="/" className="flex items-center no-underline">
-          <img src="/lemon-single.png" alt="Lemon" className="h-14 w-auto" />
-          <span className="text-[22px] font-black tracking-[-0.03em] text-white [font-family:Inter,sans-serif]">Lemon</span>
+          <img src="/lemon-single.png" alt="Lemon" className="h-10 w-auto sm:h-14" />
+          <span className="text-[19px] font-black tracking-[-0.03em] text-white sm:text-[22px] [font-family:Inter,sans-serif]">Lemon</span>
         </Link>
 
         <div className="flex items-center gap-1">
-          <Link href="/how-it-works" className="px-[14px] py-2 text-[14px] font-medium text-[rgba(255,255,255,0.65)] no-underline">How it works</Link>
-          <Link href="/agents" className="px-[14px] py-2 text-[14px] font-medium text-[rgba(255,255,255,0.65)] no-underline">Agents</Link>
-          <Link href="/gallery" className="px-[14px] py-2 text-[14px] font-medium text-[rgba(255,255,255,0.65)] no-underline">Gallery</Link>
-          <Link href="/leaderboard" className="px-[14px] py-2 text-[14px] font-medium text-[rgba(255,255,255,0.65)] no-underline">Leaderboard</Link>
+          <div className="hidden items-center gap-1 sm:flex">
+            <Link href="/how-it-works" className="px-[14px] py-2 text-[14px] font-medium text-[rgba(255,255,255,0.65)] no-underline">How it works</Link>
+            <Link href="/gallery" className="px-[14px] py-2 text-[14px] font-medium text-[rgba(255,255,255,0.65)] no-underline">Gallery</Link>
+            <Link href="/leaderboard" className="px-[14px] py-2 text-[14px] font-medium text-[rgba(255,255,255,0.65)] no-underline">Leaderboard</Link>
+          </div>
           <ConnectButton />
         </div>
       </nav>
@@ -60,9 +59,16 @@ export default function Home() {
           >
             Deploy your agent
           </button>
+        ) : isRegistered === undefined ? (
+          <button
+            disabled
+            className="cursor-not-allowed rounded-full border-none px-12 py-[18px] text-[18px] font-bold tracking-[-0.01em] text-white opacity-70 [background:linear-gradient(135deg,#e8a820,#c8820a)] [box-shadow:0_8px_32px_rgba(200,130,10,0.3)] [font-family:Inter,sans-serif]"
+          >
+            Loading…
+          </button>
         ) : (
-          <Link href={ctaHref!} className="no-underline">
-            <button className="cursor-pointer rounded-full border-none px-12 py-[18px] text-[18px] font-bold tracking-[-0.01em] text-white [background:linear-gradient(135deg,#e8a820,#c8820a)] [box-shadow:0_8px_32px_rgba(200,130,10,0.4)] [font-family:Inter,sans-serif]">
+          <Link href={isRegistered ? "/dashboard" : "/onboard"} className="no-underline">
+            <button className="cursor-pointer rounded-full border-none px-12 py-[18px] text-[18px] font-bold tracking-[-0.01em] text-white transition-[transform,box-shadow] duration-150 [background:linear-gradient(135deg,#e8a820,#c8820a)] [box-shadow:0_8px_32px_rgba(200,130,10,0.4)] [font-family:Inter,sans-serif] hover:translate-y-[-2px] hover:[box-shadow:0_14px_40px_rgba(200,130,10,0.5)]">
               {isRegistered ? "Back to the pool" : "Deploy your agent"}
             </button>
           </Link>
