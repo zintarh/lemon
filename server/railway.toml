@@ -2,7 +2,7 @@
 builder = "nixpacks"
 
 [deploy]
-startCommand = "node --no-deprecation --import tsx/esm server/src/index.ts"
+startCommand = "node server/dist/index.js"
 healthcheckPath = "/health"
 healthcheckTimeout = 30
 restartPolicyType = "on_failure"

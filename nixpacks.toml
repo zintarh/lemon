@@ -1,0 +1,16 @@
+[phases.install]
+onlyIncludeFiles = [
+  "package.json",
+  "package-lock.json",
+  "server/package.json",
+  "agent/package.json",
+  "frontend/package.json",
+  "contracts/package.json"
+]
+cmds = ["npm install"]
+
+[phases.build]
+cmds = ["npm run build --workspace=@lemon/server"]
+
+[start]
+cmd = "node server/dist/index.js"
