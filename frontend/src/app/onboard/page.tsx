@@ -573,7 +573,7 @@ export default function OnboardPage() {
     if (isApproveSuccess) router.push("/dashboard");
   }, [isApproveSuccess, router]);
 
-  const [onboardMode, setOnboardMode] = useState<"choose" | "template" | "voice-preview">("choose");
+  const [onboardMode, setOnboardMode] = useState<"choose" | "template">("choose");
   const [showVoiceModal, setShowVoiceModal] = useState(false);
 
   const [step, setStep] = useState(0);
@@ -608,7 +608,7 @@ export default function OnboardPage() {
     setPersonalityFree(profile.personality);
     setLookingFor(profile.lookingFor);
     setDealBreakers(profile.dealBreakers);
-    // Pick the closest template by lookingFor overlap (for the sidebar thumbnail)
+    // Pick the closest template by lookingFor overlap (for sidebar thumbnail)
     const best = TEMPLATES.reduce((a, b) => {
       const scoreA = a.lookingFor.filter(id => profile.lookingFor.includes(id)).length;
       const scoreB = b.lookingFor.filter(id => profile.lookingFor.includes(id)).length;
@@ -616,8 +616,11 @@ export default function OnboardPage() {
     });
     setSelectedId(best.id);
     setShowVoiceModal(false);
-    // Go to preview so user can upload a photo and confirm before continuing
-    setOnboardMode("voice-preview");
+    // Drop into the same form as template flow — pre-populated, ready to edit
+    setOnboardMode("template");
+    setStep(1);
+    setSubStep(0);
+    toast.success("Profile ready!", { description: "Add a photo and review your details." });
   }
 
   function validateStep0() {
@@ -639,6 +642,11 @@ export default function OnboardPage() {
     }
     if (!personalityFree.trim()) {
       toast.error("Add a personality description.", { description: "Tell us a bit about your agent." });
+      return false;
+    }
+    if (!avatarPreview) {
+      toast.error("Add a profile photo.", { description: "Your photo is used to generate your agent's date image." });
+      avatarInputRef.current?.click(); // pop the file picker for them
       return false;
     }
     return true;
@@ -866,137 +874,6 @@ export default function OnboardPage() {
     </div>
   );
 
-
-  // ── Voice preview ──────────────────────────────────────────────────────────────
-
-  if (onboardMode === "voice-preview") return (
-    <div className={pageClass}>
-      {showVoiceModal && (
-        <VoiceOnboardingModal onComplete={handleVoiceComplete} onClose={() => setShowVoiceModal(false)} />
-      )}
-      <MiniHeader right={<ConnectButton />} />
-      <div className="flex-1 overflow-y-auto px-5 py-6 sm:px-8 sm:py-8">
-        <div className="mx-auto max-w-[480px] flex flex-col gap-5">
-
-          {/* Header */}
-          <div>
-            <p className="text-[11px] font-bold tracking-[0.1em] uppercase text-[#1a1206]/30 m-0 mb-1">
-              Voice Setup · Done
-            </p>
-            <h1 className="font-black text-[clamp(22px,3.5vh,32px)] text-[#1a1206] tracking-[-0.04em] leading-[1.1] m-0 mb-1">
-              Here&apos;s your agent
-            </h1>
-            <p className="text-[13px] text-[#1a1206]/45 m-0 leading-[1.5]">
-              Lemon built this from your answers. Add a photo, then continue.
-            </p>
-          </div>
-
-          {/* Avatar upload — required in this flow */}
-          <div className="rounded-2xl bg-white border border-black/[0.07] shadow-[0_1px_8px_rgba(0,0,0,0.04)] px-4 py-4">
-            <p className="text-[10px] font-bold tracking-[0.1em] uppercase text-[#1a1206]/30 mb-3">
-              Profile photo <span className="text-red-500">*</span>
-            </p>
-            <div className="flex items-center gap-4">
-              {/* Preview circle */}
-              <div
-                onClick={() => avatarInputRef.current?.click()}
-                className="relative shrink-0 w-16 h-16 rounded-full cursor-pointer overflow-hidden border-2 border-dashed border-[#D6820A]/50 hover:border-[#D6820A] transition-colors flex items-center justify-center bg-amber-50"
-              >
-                {avatarPreview ? (
-                  // eslint-disable-next-line @next/next/no-img-element
-                  <img src={avatarPreview} alt="Avatar" className="w-full h-full object-cover" />
-                ) : (
-                  <span className="text-2xl">📷</span>
-                )}
-                {avatarLoading && (
-                  <div className="absolute inset-0 flex items-center justify-center bg-white/70">
-                    <LemonPulseLoader className="h-5 w-5" />
-                  </div>
-                )}
-              </div>
-              <div>
-                <button
-                  type="button"
-                  onClick={() => avatarInputRef.current?.click()}
-                  className="rounded-xl border border-[rgba(0,0,0,0.1)] bg-white px-4 py-2 text-[13px] font-semibold text-[#1a1206]/70 cursor-pointer hover:bg-black/[0.03] transition-colors"
-                >
-                  {avatarPreview ? "Change photo" : "Upload photo"}
-                </button>
-                <p className="text-[11px] text-[#1a1206]/35 mt-1 m-0">JPG or PNG · helps with matching</p>
-              </div>
-            </div>
-            <input
-              ref={avatarInputRef}
-              type="file"
-              accept="image/*"
-              className="hidden"
-              onChange={handleAvatarChange}
-            />
-          </div>
-
-          {/* Profile summary cards */}
-          <div className="rounded-2xl bg-white border border-black/[0.07] shadow-[0_1px_8px_rgba(0,0,0,0.04)] divide-y divide-black/[0.05]">
-            <div className="px-4 py-3">
-              <p className="text-[10px] font-bold tracking-[0.1em] uppercase text-[#1a1206]/30 mb-0.5">Name</p>
-              <p className="text-[16px] font-bold text-[#1a1206]">{name || "—"}</p>
-            </div>
-            <div className="px-4 py-3">
-              <p className="text-[10px] font-bold tracking-[0.1em] uppercase text-[#1a1206]/30 mb-1.5">Personality</p>
-              <p className="text-[13px] text-[#1a1206]/70 leading-[1.6] line-clamp-4">{personalityFree || "—"}</p>
-            </div>
-            <div className="px-4 py-3">
-              <p className="text-[10px] font-bold tracking-[0.1em] uppercase text-[#1a1206]/30 mb-2">Looking for</p>
-              <div className="flex flex-wrap gap-1.5">
-                {lookingFor.length > 0 ? lookingFor.map(id => {
-                  const chip = LOOKING_FOR_CHIPS.find(c => c.id === id);
-                  return chip ? (
-                    <span key={id} className="rounded-full border border-[#D6820A]/40 bg-[#D6820A]/10 px-2.5 py-0.5 text-[12px] font-semibold text-[#92400e]">
-                      {chip.label}
-                    </span>
-                  ) : null;
-                }) : <span className="text-[12px] text-[#1a1206]/30">None selected</span>}
-              </div>
-            </div>
-            <div className="px-4 py-3">
-              <p className="text-[10px] font-bold tracking-[0.1em] uppercase text-[#1a1206]/30 mb-2">Deal breakers</p>
-              <div className="flex flex-wrap gap-1.5">
-                {dealBreakers.length > 0 ? dealBreakers.map(id => {
-                  const chip = DEAL_BREAKER_CHIPS.find(c => c.id === id);
-                  return chip ? (
-                    <span key={id} className="rounded-full border border-red-300/60 bg-red-50 px-2.5 py-0.5 text-[12px] font-semibold text-red-600">
-                      {chip.label}
-                    </span>
-                  ) : null;
-                }) : <span className="text-[12px] text-[#1a1206]/30">None selected</span>}
-              </div>
-            </div>
-          </div>
-
-          {/* Actions */}
-          <div className="flex flex-col gap-2 pb-4">
-            {!avatarPreview && (
-              <p className="text-[11px] text-amber-600 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2 text-center">
-                Upload a photo to help your agent stand out in the pool
-              </p>
-            )}
-            <button
-              className="btn btn-primary w-full text-[clamp(13px,1.7vh,15px)]"
-              onClick={() => { setOnboardMode("template"); setStep(1); setSubStep(1); }}
-            >
-              Looks good — continue →
-            </button>
-            <button
-              type="button"
-              onClick={() => { setOnboardMode("template"); setStep(1); setSubStep(0); }}
-              className="text-center text-[12px] text-[#1a1206]/40 underline underline-offset-2 cursor-pointer bg-transparent border-none py-1"
-            >
-              Edit all details
-            </button>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
 
   // ── Mode choice ──────────────────────────────────────────────────────────────
 
@@ -1231,24 +1108,30 @@ export default function OnboardPage() {
 
           {/* Sub-step 0: Identity & Style */}
           {subStep === 0 && (<>
-            <SectionCard title="Identity" sub="Give your agent a name and a face.">
+            <SectionCard title="Identity" sub="Give your agent a name and a photo — both required.">
               <div className="flex items-center gap-[clamp(12px,2vw,20px)]">
-                <div
-                  onClick={() => avatarInputRef.current?.click()}
-                  title="Upload photo"
-                  className={[
-                    "shrink-0 flex items-center justify-center cursor-pointer overflow-hidden",
-                    "w-[clamp(52px,7vh,72px)] h-[clamp(52px,7vh,72px)] rounded-[clamp(12px,1.8vh,18px)]",
-                    avatarPreview ? "border-2 border-dashed border-[#D6820A]" : "border-none",
-                  ].join(" ")}
-                  style={{ background: avatarPreview ? "transparent" : `linear-gradient(135deg, ${template?.accent ?? "#e8a820"}, ${template?.accentTo ?? "#c8820a"})` }}
-                >
-                  {avatarLoading
-                    ? <LemonPulseLoader className="h-5 w-5 drop-shadow-md brightness-0 invert" />
-                    : avatarPreview
-                    ? <img src={avatarPreview} alt="Avatar" className="w-full h-full object-cover" />
-                    : <span className="text-[clamp(9px,1.2vh,11px)] font-bold text-white/85 text-center leading-[1.4]">Add<br />photo</span>
-                  }
+                <div className="shrink-0 relative">
+                  {/* Pulsing ring when no photo yet — draws attention */}
+                  {!avatarPreview && !avatarLoading && (
+                    <span className="absolute inset-0 rounded-[clamp(12px,1.8vh,18px)] animate-ping bg-[#D6820A]/30 pointer-events-none" />
+                  )}
+                  <div
+                    onClick={() => avatarInputRef.current?.click()}
+                    title="Upload photo (required)"
+                    className={[
+                      "relative flex items-center justify-center cursor-pointer overflow-hidden",
+                      "w-[clamp(52px,7vh,72px)] h-[clamp(52px,7vh,72px)] rounded-[clamp(12px,1.8vh,18px)]",
+                      avatarPreview ? "border-2 border-dashed border-[#D6820A]" : "border-2 border-dashed border-[#D6820A]/60",
+                    ].join(" ")}
+                    style={{ background: avatarPreview ? "transparent" : `linear-gradient(135deg, ${template?.accent ?? "#e8a820"}, ${template?.accentTo ?? "#c8820a"})` }}
+                  >
+                    {avatarLoading
+                      ? <LemonPulseLoader className="h-5 w-5 drop-shadow-md brightness-0 invert" />
+                      : avatarPreview
+                      ? <img src={avatarPreview} alt="Avatar" className="w-full h-full object-cover" />
+                      : <span className="text-[clamp(9px,1.2vh,11px)] font-bold text-white/85 text-center leading-[1.4]">Add<br />photo<br /><span className="text-white/60">*</span></span>
+                    }
+                  </div>
                 </div>
                 <input ref={avatarInputRef} type="file" accept="image/*" className="hidden" onChange={handleAvatarChange} />
                 <div className="flex-1">
@@ -1267,7 +1150,7 @@ export default function OnboardPage() {
               </div>
             </SectionCard>
 
-            <SectionCard title="Personality" sub="Pre-filled from your template — edit freely.">
+            <SectionCard title="Personality" sub="Pre-filled from your setup — edit freely.">
               <textarea
                 className="input w-full resize-none pt-3 text-[clamp(12px,1.6vh,14px)] leading-[1.6]"
                 style={{ minHeight: "clamp(80px,12vh,140px)" }}
