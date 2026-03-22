@@ -1,0 +1,14 @@
+FROM node:20-alpine
+WORKDIR /app
+
+# Copy entire monorepo so npm can resolve workspaces
+COPY . .
+
+# Install with full workspace context (all package.json files present)
+RUN npm install
+
+# Build server workspace
+RUN npm run build --workspace=@lemon/server
+
+EXPOSE 3000
+CMD ["node", "server/dist/index.js"]
