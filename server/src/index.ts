@@ -5,9 +5,10 @@
  * and orchestrates the full date lifecycle.
  *
  * Read path  → Supabase (fast, indexed)
- * Write path → on-chain (viem) then Supabase update via indexer
+ * Write path → on-chain (viem) then POST …/sync-profile or indexer → Supabase
  *
  *  POST /api/agents/register          — notify server of new on-chain registration
+ *  POST /api/agents/:wallet/sync-profile — chain → Supabase after updateProfile
  *  POST /api/match/run                — trigger matching run for all active agents
  *  POST /api/conversation/start       — start a 30-min AI conversation for a pair
  *  POST /api/date/book                — book date on-chain after conversation passes
@@ -25,6 +26,7 @@ import {
   completeDate,
   mintNFT,
   resolveNextPayer,
+  collectPayment,
   generateAgentWallet,
   setOperatorKey,
   fundAgentWallet,
@@ -32,8 +34,7 @@ import {
 import { postDateTweet } from "./twitter.js";
 import { startSelfSession, pollAndUpdateDB } from "./selfclaw.js";
 // indexer.ts is kept for reference but not used — DB is written directly after tx receipt
-import { handleTelegramUpdate, sendIntroMessage } from "./telegram.js";
-import { buildDatePaymentRequest } from "./x402.js";
+import { handleTelegramUpdate, sendIntroMessage, sendRematchSuggestion } from "./telegram.js";
 import { registerERC8004Agent } from "./erc8004.js";
 import {
   dbGetAllActiveAgents,
@@ -55,14 +56,16 @@ import {
   dbCountCompletedDatesBetween,
   supabase,
 } from "./db.js";
-import type { Address, Hash } from "viem";
+import { isAddress, type Address, type Hash } from "viem";
+import { requireInternalSecret, warnIfInternalSecretUnset } from "./internalAuth.js";
 
 const app = express();
 app.use(cors({ origin: true, credentials: true }));
 app.use(express.json());
 
 const AGENT_URL = process.env.AGENT_URL ?? `http://localhost:${process.env.AGENT_PORT ?? 5000}`;
-const PORT = process.env.SERVER_PORT ?? 4000;
+// Railway/Render/Fly inject PORT; local dev often uses SERVER_PORT
+const PORT = Number(process.env.SERVER_PORT || process.env.PORT || 4000);
 
 const CUSD_ADDRESS = (
   process.env.NETWORK === "testnet"
@@ -70,9 +73,30 @@ const CUSD_ADDRESS = (
     : "0x765DE816845861e75A25fCA122bb6898B8B1282a"
 ) as Address;
 
-function agentCall(path: string, body: unknown) {
-  return axios.post(`${AGENT_URL}${path}`, body).then((r) => r.data);
+const DATE_COST_CENTS = Number(process.env.DATE_COST_CENTS ?? 100);
+const DATE_COST_USD_STR = (DATE_COST_CENTS / 100).toFixed(2); // e.g. "1.00"
+
+const VALID_DATE_TEMPLATES = new Set([
+  "COFFEE",
+  "BEACH",
+  "WORK",
+  "ROOFTOP_DINNER",
+  "GALLERY_WALK",
+]);
+
+function agentHeaders(): Record<string, string> {
+  const h: Record<string, string> = { "Content-Type": "application/json" };
+  const s = process.env.LEMON_INTERNAL_SECRET;
+  if (s) h["X-Lemon-Internal-Secret"] = s;
+  return h;
 }
+
+function agentCall(path: string, body: unknown) {
+  return axios.post(`${AGENT_URL}${path}`, body, { headers: agentHeaders() }).then((r) => r.data);
+}
+
+/** Prevents overlapping matcher cycles (interval + manual trigger). */
+let matchingCycleInFlight = false;
 
 // ─── Health ──────────────────────────────────────────────────────────────────
 
@@ -190,35 +214,21 @@ app.post("/api/agents/register", async (req: Request, res: Response) => {
 // Runs the full matching cycle (find matches + start conversation) immediately.
 // Called by the dashboard "Check for match now" button.
 
-app.post("/api/match/run", async (_req: Request, res: Response) => {
+app.post("/api/match/run", async (req: Request, res: Response) => {
+  if (!requireInternalSecret(req, res)) return;
   // Respond immediately so the button doesn't time out — cycle runs in background
   res.json({ ok: true, message: "Matching cycle started" });
-  runMatchingCycle().catch((err) =>
+  runMatchingCycleGuarded().catch((err) =>
     console.error("[server] /api/match/run cycle error:", (err as Error).message)
   );
 });
 
-// ─── POST /api/payment/initiate ──────────────────────────────────────────────
-// Returns the payment request(s) the client must fulfil before calling date/book.
-
-app.post("/api/payment/initiate", async (req: Request, res: Response) => {
-  try {
-    const { walletA, walletB, payerMode } = req.body as {
-      walletA: Address;
-      walletB: Address;
-      payerMode: "AGENT_A" | "AGENT_B" | "SPLIT";
-    };
-    const requests = buildDatePaymentRequest(walletA, walletB, payerMode);
-    res.json({ requests, totalCents: Number(process.env.DATE_COST_CENTS ?? 500) });
-  } catch (err) {
-    res.status(500).json({ error: (err as Error).message });
-  }
-});
 
 // ─── POST /api/conversation/message ──────────────────────────────────────────
 // Called by the agent service after each message — saves to DB for live polling
 
 app.post("/api/conversation/message", async (req: Request, res: Response) => {
+  if (!requireInternalSecret(req, res)) return;
   try {
     const { walletA, walletB, message } = req.body as { walletA: string; walletB: string; message: object };
     await dbAppendConversationMessage(walletA, walletB, message);
@@ -259,7 +269,8 @@ app.get("/api/conversation/live", async (req: Request, res: Response) => {
       isStale,
       lastMessageAt: lastMsgAt || null,
       bookingError: (t.bookingError as string) ?? null,
-      bookingPending: (t.bookingPending as boolean) ?? (convo.passed && !t.bookingError),
+      bookingPending: (t.bookingPending as boolean) ?? false,
+      bookingComplete: (t.bookingComplete as boolean) ?? false,
     });
   } catch (err) {
     res.status(500).json({ error: (err as Error).message });
@@ -271,6 +282,7 @@ app.get("/api/conversation/live", async (req: Request, res: Response) => {
 // Call this when a conversation is frozen and agents are permanently blocked.
 
 app.post("/api/conversation/reset", async (req: Request, res: Response) => {
+  if (!requireInternalSecret(req, res)) return;
   try {
     const { wallet } = req.body as { wallet?: string };
 
@@ -303,8 +315,13 @@ app.post("/api/conversation/reset", async (req: Request, res: Response) => {
 // ─── POST /api/conversation/start ────────────────────────────────────────────
 
 app.post("/api/conversation/start", async (req: Request, res: Response) => {
+  if (!requireInternalSecret(req, res)) return;
   try {
     const { walletA, walletB } = req.body as { walletA: Address; walletB: Address };
+    if (!walletA || !walletB || !isAddress(walletA) || !isAddress(walletB)) {
+      res.status(400).json({ error: "walletA and walletB must be valid 0x addresses" });
+      return;
+    }
 
     const [agentA, agentB] = await Promise.all([
       dbGetAgent(walletA),
@@ -359,6 +376,9 @@ async function performDateBooking(
   template: string,
   sharedInterests: string[]
 ): Promise<{ dateId: string; nftTokenId: string; metadataURI: string; imageUrl: string; tweetUrl: string | null }> {
+  if (!VALID_DATE_TEMPLATES.has(template)) {
+    throw new Error(`Invalid template "${template}". Expected one of: ${[...VALID_DATE_TEMPLATES].join(", ")}`);
+  }
   const [agentA, agentB] = await Promise.all([dbGetAgent(walletA), dbGetAgent(walletB)]);
   if (!agentA || !agentB) throw new Error("One or both agents not found in DB");
 
@@ -379,7 +399,31 @@ async function performDateBooking(
     payerMode = onChainPayer.toLowerCase() === walletA.toLowerCase() ? "AGENT_A" : "AGENT_B";
   }
 
-  // 2. Plan the date
+  // 2. Collect cUSD payment (direct on-chain transfer from agent wallets → treasury)
+  const agentAKey = agentA.agent_private_key as `0x${string}` | undefined;
+  const agentBKey = agentB.agent_private_key as `0x${string}` | undefined;
+  if (!agentAKey || !agentBKey) throw new Error("Agent private keys not found — cannot process payment");
+
+  const treasuryAddress = (
+    process.env.LEMON_TREASURY_ADDRESS ?? process.env.DEPLOYER_ADDRESS ?? ""
+  ) as `0x${string}`;
+
+  if (!treasuryAddress) throw new Error("LEMON_TREASURY_ADDRESS is not set");
+
+  try {
+    await collectPayment({
+      payerMode: payerMode as "AGENT_A" | "AGENT_B" | "SPLIT",
+      agentAPrivateKey: agentAKey,
+      agentBPrivateKey: agentBKey,
+      treasuryAddress,
+      cUSDAddress: CUSD_ADDRESS,
+      amountUSD: DATE_COST_USD_STR,
+    });
+  } catch (e) {
+    throw new Error(`Payment failed: ${(e as Error).message}`);
+  }
+
+  // 3. Plan the date (image + metadata — payment already done)
   let plan: Awaited<ReturnType<typeof agentCall>>;
   try {
     plan = await agentCall("/plan-date", {
@@ -387,6 +431,7 @@ async function performDateBooking(
       profileB: { ...toProfile(agentB), billingMode: payerMode === "AGENT_B" ? "SOLO" : agentB.billing_mode === 0 ? "SPLIT" : "SOLO" },
       template,
       sharedInterests,
+      chainResolvedPayer: payerMode as "AGENT_A" | "AGENT_B" | "SPLIT",
     });
   } catch (e) {
     throw new Error(`Date planning failed: ${(e as Error).message}`);
@@ -395,8 +440,8 @@ async function performDateBooking(
   const TEMPLATE_NUM: Record<string, number> = { COFFEE: 0, BEACH: 1, WORK: 2, ROOFTOP_DINNER: 3, GALLERY_WALK: 4 };
   const PAYER_NUM: Record<string, number> = { AGENT_A: 0, AGENT_B: 1, SPLIT: 2 };
 
-  // 3. Book on-chain
-  const signerKey = (agentA.agent_private_key || undefined) as `0x${string}` | undefined;
+  // 4. Book on-chain
+  const signerKey = agentAKey;
   let dateId: bigint;
   try {
     dateId = await bookDate({
@@ -419,7 +464,7 @@ async function performDateBooking(
   });
   console.log(`[server] date #${dateId} written to DB (status: ACTIVE)`);
 
-  // 4. Mint NFT
+  // 5. Mint NFT
   let nftTokenId: bigint;
   try {
     nftTokenId = await mintNFT({
@@ -433,7 +478,7 @@ async function performDateBooking(
     throw mintErr;
   }
 
-  // 5. Complete on-chain + DB
+  // 6. Complete on-chain + DB
   await completeDate(dateId, nftTokenId);
   const completedAt = Math.floor(Date.now() / 1000);
   await dbUpdateDate(dateId.toString(), {
@@ -441,13 +486,18 @@ async function performDateBooking(
   });
   console.log(`[server] date #${dateId} COMPLETED (nft: ${nftTokenId})`);
 
-  // 6. Telegram intro (non-fatal)
+  // 7. Telegram notifications (non-fatal)
+  const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? process.env.SERVER_URL ?? "https://lemon.dating";
+  // Rematch suggestion after every date
+  sendRematchSuggestion(walletA.toLowerCase(), walletB.toLowerCase(), agentA.name, agentB.name, template, appUrl)
+    .catch(() => {});
+  // Contact reveal intro after 3rd date
   dbCountCompletedDatesBetween(walletA.toLowerCase(), walletB.toLowerCase())
     .then(async (count) => {
       if (count === 3) await sendIntroMessage(walletA.toLowerCase(), walletB.toLowerCase(), agentA.name, agentB.name).catch(() => {});
     }).catch(() => {});
 
-  // 7. Tweet (non-fatal)
+  // 8. Tweet (non-fatal)
   let tweetUrl: string | null = null;
   try {
     const tweet = await postDateTweet({ ipfsImageCID: plan.ipfsImageCID, caption: plan.tweetCaption });
@@ -462,10 +512,19 @@ async function performDateBooking(
 // Kept for backwards compat but auto-booking now happens in runMatchingCycle.
 
 app.post("/api/date/book", async (req: Request, res: Response) => {
+  if (!requireInternalSecret(req, res)) return;
   try {
     const { walletA, walletB, template, sharedInterests } = req.body as {
       walletA: Address; walletB: Address; template: string; sharedInterests: string[];
     };
+    if (!walletA || !walletB || !isAddress(walletA) || !isAddress(walletB)) {
+      res.status(400).json({ error: "walletA and walletB must be valid 0x addresses" });
+      return;
+    }
+    if (!template || !VALID_DATE_TEMPLATES.has(template)) {
+      res.status(400).json({ error: `Invalid template. Must be one of: ${[...VALID_DATE_TEMPLATES].join(", ")}` });
+      return;
+    }
     const result = await performDateBooking(walletA, walletB, template, sharedInterests ?? []);
     res.json(result);
   } catch (err) {
@@ -479,19 +538,38 @@ app.post("/api/date/book", async (req: Request, res: Response) => {
 app.post("/api/date/retry", async (req: Request, res: Response) => {
   try {
     const { walletA, walletB } = req.body as { walletA: Address; walletB: Address };
+    if (!walletA || !isAddress(walletA)) {
+      res.status(400).json({ error: "walletA must be a valid 0x address" });
+      return;
+    }
     const convo = await dbGetLiveConversation(walletA);
     if (!convo || !convo.passed || !convo.template_suggested) {
       res.status(400).json({ error: "No passed conversation found to retry booking for." });
       return;
     }
+    const left = convo.wallet_a.toLowerCase();
+    const right = convo.wallet_b.toLowerCase();
+    if (walletB) {
+      if (!isAddress(walletB)) {
+        res.status(400).json({ error: "walletB must be a valid 0x address" });
+        return;
+      }
+      const wb = walletB.toLowerCase();
+      if (wb !== left && wb !== right) {
+        res.status(400).json({ error: "walletB is not part of this conversation" });
+        return;
+      }
+    }
+    const bookA = convo.wallet_a as Address;
+    const bookB = convo.wallet_b as Address;
     // Clear any previous booking error from transcript
     const transcript = (convo.transcript as Record<string, unknown>) ?? {};
     await supabase.from("conversations").update({
       transcript: { ...transcript, bookingError: null, bookingPending: true },
     }).eq("id", convo.id);
 
-    // Run booking in background — don't block the HTTP response
-    performDateBooking(walletA, walletB, convo.template_suggested, convo.shared_interests ?? [])
+    // Run booking in background — don't block the HTTP response (canonical pair order from DB)
+    performDateBooking(bookA, bookB, convo.template_suggested, convo.shared_interests ?? [])
       .then(async () => {
         await supabase.from("conversations").update({
           transcript: { ...transcript, bookingError: null, bookingPending: false },
@@ -506,6 +584,54 @@ app.post("/api/date/retry", async (req: Request, res: Response) => {
       });
 
     res.json({ ok: true, message: "Booking retry started" });
+  } catch (err) {
+    res.status(500).json({ error: (err as Error).message });
+  }
+});
+
+// ─── POST /api/date/rematch ───────────────────────────────────────────────────
+// Human chooses to date the same agent again — starts a fresh conversation.
+
+app.post("/api/date/rematch", async (req: Request, res: Response) => {
+  try {
+    const { walletA, walletB } = req.body as { walletA: Address; walletB: Address };
+    if (!walletA || !isAddress(walletA) || !walletB || !isAddress(walletB)) {
+      res.status(400).json({ error: "walletA and walletB must be valid 0x addresses" });
+      return;
+    }
+
+    const [agentA, agentB] = await Promise.all([dbGetAgent(walletA), dbGetAgent(walletB)]);
+    if (!agentA || !agentB) {
+      res.status(404).json({ error: "One or both agents not found" });
+      return;
+    }
+
+    const toProfile = (a: typeof agentA) => ({
+      wallet: a!.wallet, name: a!.name, personality: a!.personality,
+      preferences: a!.preferences, dealBreakers: a!.deal_breakers,
+      billingMode: a!.billing_mode === 0 ? "SPLIT" : "SOLO",
+      avatarUri: a!.avatar_uri,
+    });
+
+    // Start fresh conversation in background
+    res.json({ ok: true, message: "Rematch started — agents are having a new conversation" });
+
+    agentCall("/conversation", {
+      profileA: toProfile(agentA),
+      profileB: toProfile(agentB),
+      simulate: true,
+      callbackUrl: `${process.env.SERVER_URL ?? `http://localhost:${PORT}`}/api/conversation/message`,
+    }).then(async (result: { passed: boolean; suggestedDateTemplate?: string; sharedInterests?: string[] }) => {
+      await dbMarkConversationDone(
+        walletA.toLowerCase(), walletB.toLowerCase(),
+        result.passed,
+        result.passed ? (result.suggestedDateTemplate ?? "COFFEE") : undefined,
+        result.sharedInterests ?? []
+      );
+      console.log(`[rematch] Conversation complete: passed=${result.passed}`);
+    }).catch((e: Error) => {
+      console.error("[rematch] Conversation failed:", e.message);
+    });
   } catch (err) {
     res.status(500).json({ error: (err as Error).message });
   }
@@ -574,6 +700,38 @@ app.get("/api/agents/pool-status", async (_req: Request, res: Response) => {
     const available = total - busy;
 
     res.json({ total, verified, busy, available, totalDates: totalDates ?? 0, busyWallets: [...busyWallets] });
+  } catch (err) {
+    res.status(500).json({ error: (err as Error).message });
+  }
+});
+
+// ─── POST /api/agents/:wallet/sync-profile ────────────────────────────────────
+// After updateProfile on-chain: re-read contract → Supabase so matcher uses fresh prefs.
+// Safe: data comes from chain, not the client body. Preserves selfclaw / agent_wallet keys.
+
+app.post("/api/agents/:wallet/sync-profile", async (req: Request, res: Response) => {
+  try {
+    const raw = req.params.wallet;
+    if (!raw || !isAddress(raw)) {
+      res.status(400).json({ error: "Invalid wallet address" });
+      return;
+    }
+    const wallet = raw as Address;
+    const { syncAgentFromChain } = await import("./syncAgentFromChain.js");
+
+    let lastErr: Error | null = null;
+    for (let attempt = 1; attempt <= 4; attempt++) {
+      try {
+        await syncAgentFromChain(wallet);
+        res.json({ ok: true });
+        return;
+      } catch (e) {
+        lastErr = e as Error;
+        console.warn(`[server] /api/agents/.../sync-profile attempt ${attempt}/4: ${lastErr.message}`);
+        await new Promise((r) => setTimeout(r, 2000));
+      }
+    }
+    res.status(500).json({ error: lastErr?.message ?? "Could not sync profile from chain" });
   } catch (err) {
     res.status(500).json({ error: (err as Error).message });
   }
@@ -763,6 +921,19 @@ setInterval(cleanupZombieConversations, 5 * 60 * 1000);
 
 const MATCH_INTERVAL_MS = Number(process.env.MATCH_INTERVAL_MS ?? 3 * 60 * 1000); // 3 min default
 
+async function runMatchingCycleGuarded() {
+  if (matchingCycleInFlight) {
+    console.log("[matcher] Skipping overlapping match cycle");
+    return;
+  }
+  matchingCycleInFlight = true;
+  try {
+    await runMatchingCycle();
+  } finally {
+    matchingCycleInFlight = false;
+  }
+}
+
 async function runMatchingCycle() {
   try {
     const agents = await dbGetAllActiveAgents();
@@ -849,25 +1020,39 @@ async function runMatchingCycle() {
 
         if (convo.passed) {
           const template = convo.suggestedDateTemplate ?? "COFFEE";
-          console.log(`[matcher] ✓ Conversation passed — auto-booking date (template: ${template})…`);
+          console.log(`[matcher] ✓ Conversation passed — auto-booking (template: ${template})…`);
 
-          // Auto-book — no user action needed. Store error in transcript if it fails.
+          // Mark as pending so the dashboard shows the spinner immediately
+          const convoRow = await dbGetLiveConversation(top.agentA);
+          if (convoRow) {
+            const existing = (convoRow.transcript as Record<string, unknown>) ?? {};
+            await supabase.from("conversations").update({
+              transcript: { ...existing, bookingPending: true, bookingError: null, bookingComplete: false },
+            }).eq("id", convoRow.id);
+          }
+
           performDateBooking(
             top.agentA as Address,
             top.agentB as Address,
             template,
             top.sharedInterests ?? []
-          ).then(() => {
+          ).then(async () => {
             console.log(`[matcher] ✓ Auto-booking complete for ${top.agentA.slice(0, 8)}↔${top.agentB.slice(0, 8)}`);
+            const row = await dbGetLiveConversation(top.agentA);
+            if (row) {
+              const t = (row.transcript as Record<string, unknown>) ?? {};
+              await supabase.from("conversations").update({
+                transcript: { ...t, bookingPending: false, bookingComplete: true, bookingError: null },
+              }).eq("id", row.id);
+            }
           }).catch(async (bookErr) => {
             const msg = (bookErr as Error).message;
             console.error("[matcher] Auto-booking failed (user can retry):", msg);
-            // Store error in transcript so frontend can show retry button
             const row = await dbGetLiveConversation(top.agentA);
             if (row) {
-              const existing = (row.transcript as Record<string, unknown>) ?? {};
+              const t = (row.transcript as Record<string, unknown>) ?? {};
               await supabase.from("conversations").update({
-                transcript: { ...existing, bookingError: msg, bookingPending: false },
+                transcript: { ...t, bookingPending: false, bookingError: msg },
               }).eq("id", row.id);
             }
           });
@@ -890,6 +1075,15 @@ async function runMatchingCycle() {
 // BotFather: /setwebhook → https://your-server.com/telegram/webhook
 
 app.post("/telegram/webhook", async (req: Request, res: Response) => {
+  const expected = process.env.TELEGRAM_WEBHOOK_SECRET;
+  if (expected) {
+    const got = req.headers["x-telegram-bot-api-secret-token"];
+    const token = Array.isArray(got) ? got[0] : got;
+    if (token !== expected) {
+      res.status(403).send("forbidden");
+      return;
+    }
+  }
   res.sendStatus(200); // ack immediately so Telegram doesn't retry
   try {
     await handleTelegramUpdate(req.body);
@@ -1041,10 +1235,11 @@ app.post("/api/contact/pay-reveal", async (req: Request, res: Response) => {
 // ─── Boot ─────────────────────────────────────────────────────────────────────
 
 app.listen(PORT, () => {
+  warnIfInternalSecretUnset();
   console.log(`[server] Lemon backend listening on port ${PORT}`);
   console.log(`[matcher] Auto-match scheduler running every ${MATCH_INTERVAL_MS / 1000}s`);
 
   // Run once immediately at boot, then on interval
-  setTimeout(runMatchingCycle, 10_000); // 10s after boot (let indexer settle)
-  setInterval(runMatchingCycle, MATCH_INTERVAL_MS);
+  setTimeout(runMatchingCycleGuarded, 10_000); // 10s after boot (let indexer settle)
+  setInterval(runMatchingCycleGuarded, MATCH_INTERVAL_MS);
 });

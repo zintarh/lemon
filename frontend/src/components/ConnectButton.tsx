@@ -6,6 +6,7 @@ import { usePrivy } from "@privy-io/react-auth";
 import { useAccount, useBalance } from "wagmi";
 import { formatUnits } from "viem";
 import Link from "next/link";
+import { LemonPulseLoader } from "@/components/LemonPulseLoader";
 
 const SERVER = process.env.NEXT_PUBLIC_SERVER_URL ?? "http://localhost:4000";
 
@@ -160,7 +161,7 @@ function VerifyModal({
   return createPortal(
     <div
       className="fixed inset-0 z-[200] flex items-center justify-center p-4"
-      style={{ background: "rgba(0,0,0,0.55)", backdropFilter: "blur(4px)" }}
+      style={{ background: "rgba(253, 250, 246, 0.94)", backdropFilter: "blur(10px)" }}
       onClick={e => { if (e.target === e.currentTarget) onClose(); }}
     >
       <div className="relative bg-white rounded-3xl shadow-2xl p-6 flex flex-col items-center gap-4 w-full max-w-sm">
@@ -191,7 +192,7 @@ function VerifyModal({
           />
         ) : (
           <div className="w-64 h-64 rounded-2xl border border-gray-200 flex items-center justify-center">
-            <span className="w-6 h-6 rounded-full border-2 border-[#D6820A] border-t-transparent animate-spin" />
+            <LemonPulseLoader className="h-12 w-12" />
           </div>
         )}
 
@@ -215,7 +216,7 @@ function VerifyModal({
 
         {/* Polling indicator */}
         <div className="flex items-center gap-2 text-[11px] text-gray-400">
-          <span className="w-2 h-2 rounded-full border-2 border-gray-400 border-t-transparent animate-spin" />
+          <LemonPulseLoader className="h-4 w-4 shrink-0 opacity-70" />
           Waiting for verification…
         </div>
       </div>
@@ -365,7 +366,7 @@ export function ConnectButton() {
                  "Verify as human"}
               </span>
               {verifyState === "loading" ? (
-                <span className="w-3 h-3 rounded-full border-2 border-[#D6820A] border-t-transparent animate-spin" />
+                <LemonPulseLoader className="h-3.5 w-3.5 shrink-0" />
               ) : (
                 <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <path d="M9 18l6-6-6-6" />

@@ -17,7 +17,19 @@ import type { DateTemplate } from "./dateAgent.js";
 
 const VALID_TEMPLATES = new Set<string>(["COFFEE", "BEACH", "WORK", "ROOFTOP_DINNER", "GALLERY_WALK"]);
 
-const PORT = process.env.AGENT_PORT || 5000;
+const PORT = process.env.PORT || process.env.AGENT_PORT || 5000;
+const MAX_BODY_BYTES = 512 * 1024;
+
+function internalAuthOk(req: http.IncomingMessage): boolean {
+  const secret = process.env.LEMON_INTERNAL_SECRET;
+  if (!secret) return true;
+  const h = req.headers["x-lemon-internal-secret"];
+  const headerVal = Array.isArray(h) ? h[0] : h;
+  const auth = req.headers.authorization;
+  const bearer =
+    typeof auth === "string" && auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
+  return headerVal === secret || bearer === secret;
+}
 
 function json(res: http.ServerResponse, status: number, body: unknown) {
   const payload = JSON.stringify(body);
@@ -27,10 +39,20 @@ function json(res: http.ServerResponse, status: number, body: unknown) {
 
 async function parseBody(req: http.IncomingMessage): Promise<unknown> {
   return new Promise((resolve, reject) => {
-    let data = "";
-    req.on("data", (chunk) => (data += chunk));
+    const chunks: Buffer[] = [];
+    let size = 0;
+    req.on("data", (chunk: Buffer | string) => {
+      const buf = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
+      size += buf.length;
+      if (size > MAX_BODY_BYTES) {
+        reject(new Error("Payload too large"));
+        return;
+      }
+      chunks.push(buf);
+    });
     req.on("end", () => {
       try {
+        const data = Buffer.concat(chunks).toString("utf8");
         resolve(JSON.parse(data));
       } catch {
         reject(new Error("Invalid JSON"));
@@ -43,8 +65,13 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url || "/", `http://localhost:${PORT}`);
 
   try {
+    const isHealthGet = req.method === "GET" && url.pathname === "/health";
+    if (!isHealthGet && !internalAuthOk(req)) {
+      return json(res, 401, { error: "Unauthorized" });
+    }
+
     // ── GET /health ──────────────────────────────────────────────────────────
-    if (req.method === "GET" && url.pathname === "/health") {
+    if (isHealthGet) {
       return json(res, 200, { status: "ok" });
     }
 
@@ -71,11 +98,14 @@ const server = http.createServer(async (req, res) => {
       let onMessage: ((msg: import("./conversationAgent.js").ConversationMessage) => Promise<void>) | undefined;
       if (body.callbackUrl) {
         const cbUrl = body.callbackUrl;
+        const secret = process.env.LEMON_INTERNAL_SECRET;
         onMessage = async (msg) => {
           try {
+            const headers: Record<string, string> = { "Content-Type": "application/json" };
+            if (secret) headers["X-Lemon-Internal-Secret"] = secret;
             await fetch(cbUrl, {
               method: "POST",
-              headers: { "Content-Type": "application/json" },
+              headers,
               body: JSON.stringify({ walletA: body.profileA.wallet, walletB: body.profileB.wallet, message: msg }),
             });
           } catch { /* non-fatal */ }
@@ -95,6 +125,7 @@ const server = http.createServer(async (req, res) => {
         profileB: AgentProfile;
         template: string;
         sharedInterests: string[];
+        chainResolvedPayer?: "AGENT_A" | "AGENT_B" | "SPLIT";
       };
       if (!VALID_TEMPLATES.has(body.template)) {
         return json(res, 400, { error: `Invalid template: "${body.template}". Must be one of: ${[...VALID_TEMPLATES].join(", ")}` });
@@ -103,7 +134,8 @@ const server = http.createServer(async (req, res) => {
         body.profileA,
         body.profileB,
         body.template as DateTemplate,
-        body.sharedInterests
+        body.sharedInterests,
+        body.chainResolvedPayer,
       );
       return json(res, 200, plan);
     }
@@ -140,4 +172,7 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, () => {
   console.log(`[agent] Lemon agent runtime listening on port ${PORT}`);
+  if (!process.env.LEMON_INTERNAL_SECRET) {
+    console.warn("[agent] LEMON_INTERNAL_SECRET is unset — HTTP endpoints are open. Set the same value as the server in production.");
+  }
 });

@@ -1,5 +1,7 @@
 # Deploy Lemon frontend on Vercel
 
+**Full stack (frontend + server + agent):** see **[`../DEPLOYMENT.md`](../DEPLOYMENT.md)** — the browser only talks to the **server** via `NEXT_PUBLIC_SERVER_URL`; the server calls the **agent** via `AGENT_URL`.
+
 ## Project settings
 
 | Setting | Value |
@@ -13,6 +15,10 @@
 ## Environment variables
 
 Set these in **Vercel → Project → Settings → Environment Variables** (Production / Preview as needed).
+
+### Match button (proxied route)
+
+- `LEMON_INTERNAL_SECRET` — **same value** as on the Lemon server (and agent). Used by `POST /api/match/run` (Next) to call the backend without exposing the secret in the browser. If unset locally, the server also allows unauthenticated match runs (dev only).
 
 ### Required for core app (wallet, contracts)
 

@@ -1,163 +1,177 @@
 /**
- * x402.ts
+ * x402.ts (server)
  *
- * Handles x402 HTTP-native micropayments via thirdweb Engine server wallet.
+ * Proper x402 HTTP-native payment integration using thirdweb.
  *
- * Flow:
- *  1. Client calls POST /api/payment/initiate  → server returns a payment request
- *  2. Client (or server wallet) pays via x402   → returns a tx hash
- *  3. Server calls verifyPayment()              → validates the hash before booking
+ * Flow per date booking:
+ *   1. performDateBooking calls collectDatePayment(payerMode, agentAKey, agentBKey)
+ *   2. payViaX402 makes a plain POST to /api/x402/pay (or /pay-half)
+ *   3. Server responds HTTP 402 with payment requirements (amount, token, chain)
+ *   4. wrapFetchWithPayment auto-signs + retries with X-PAYMENT header
+ *   5. settlePayment verifies + settles on-chain → 200 OK
+ *   6. Booking proceeds
  *
- * The server wallet (thirdweb Engine) acts as the payment facilitator:
- *  - For SPLIT billing: each agent's wallet pays half
- *  - For SOLO billing:  the resolved payer pays full amount
- *
- * Reference: https://x402.org / thirdweb Engine docs
+ * For SPLIT billing: both agent wallets pay half in parallel.
  */
 
-import axios from "axios";
-import type { Address, Hash } from "viem";
+import { createThirdwebClient, defineChain, type Chain } from "thirdweb";
+import { privateKeyToAccount } from "thirdweb/wallets";
+import { settlePayment, facilitator, wrapFetchWithPayment } from "thirdweb/x402";
+import type { Request, Response } from "express";
 
-const ENGINE_URL = process.env.THIRDWEB_ENGINE_URL ?? "https://engine.thirdweb.com";
-const ENGINE_AUTH = process.env.THIRDWEB_SECRET_KEY ?? "";
-const SERVER_WALLET = process.env.SERVER_WALLET_ADDRESS as Address;
+// ─── Config ──────────────────────────────────────────────────────────────────
 
-// cUSD on Celo mainnet / Alfajores
-const CUSD = (
-  process.env.NETWORK === "testnet"
-    ? "0x874069Fa1Eb16D44d622F2e0Ca25eeA172369bC1"
-    : "0x765DE816845861e75A25fCA122bb6898B8B1282a"
-) as Address;
+const IS_TESTNET = process.env.NETWORK !== "mainnet";
+const chain: Chain = IS_TESTNET ? defineChain(11142220) : defineChain(42220);
 
-// Date cost in cUSD cents (configurable via env)
-const DATE_COST_CENTS = Number(process.env.DATE_COST_CENTS ?? 500); // $5.00 default
+export const TREASURY_ADDRESS = (
+  process.env.LEMON_TREASURY_ADDRESS ??
+  process.env.DEPLOYER_ADDRESS ??
+  ""
+) as `0x${string}`;
 
-export type PaymentRequest = {
-  token: Address;
-  recipient: Address;
-  amountCents: number;
-  memo: string;
-};
+const DATE_COST_CENTS = Number(process.env.DATE_COST_CENTS ?? 100);
+export const DATE_COST_USD = (DATE_COST_CENTS / 100).toFixed(2);       // "1.00"
+export const DATE_COST_HALF_USD = (DATE_COST_CENTS / 200).toFixed(2);  // "0.50"
 
-export type PaymentResult = {
-  txHash: Hash;
-  amountCents: number;
-  token: Address;
-};
+const SERVER_URL = process.env.SERVER_URL ?? "http://localhost:4000";
+export const X402_PAY_URL = `${SERVER_URL}/api/x402/pay`;
+export const X402_PAY_HALF_URL = `${SERVER_URL}/api/x402/pay-half`;
 
-// ─── Build a payment request for a date ──────────────────────────────────────
+// ─── Thirdweb clients ─────────────────────────────────────────────────────────
 
-export function buildDatePaymentRequest(
-  walletA: Address,
-  walletB: Address,
-  payerMode: "AGENT_A" | "AGENT_B" | "SPLIT"
-): PaymentRequest[] {
-  const memo = `Lemon date: ${walletA.slice(0, 6)} x ${walletB.slice(0, 6)}`;
+export const serverClient = createThirdwebClient({
+  secretKey: process.env.THIRDWEB_SECRET_KEY!,
+});
 
-  if (payerMode === "SPLIT") {
-    const half = Math.ceil(DATE_COST_CENTS / 2);
-    return [
-      { token: CUSD, recipient: SERVER_WALLET, amountCents: half, memo: `${memo} (A split)` },
-      { token: CUSD, recipient: SERVER_WALLET, amountCents: DATE_COST_CENTS - half, memo: `${memo} (B split)` },
-    ];
-  }
-
-  return [{ token: CUSD, recipient: SERVER_WALLET, amountCents: DATE_COST_CENTS, memo }];
-}
-
-// ─── Execute payment via thirdweb Engine server wallet ───────────────────────
-// The server wallet holds cUSD and sends it on behalf of the payer.
-// In production this would be triggered by an x402-aware HTTP client.
-
-export async function executePayment(request: PaymentRequest): Promise<PaymentResult> {
-  if (!ENGINE_AUTH || ENGINE_AUTH === "...") {
-    console.warn("[x402] Thirdweb Engine not configured — using mock payment hash");
-    return {
-      txHash: ("0x" + "a".repeat(64)) as Hash,
-      amountCents: request.amountCents,
-      token: request.token,
-    };
-  }
-
-  // Call thirdweb Engine to transfer ERC-20 token
-  const chainId = process.env.NETWORK === "testnet" ? 44787 : 42220;
-
-  const response = await axios.post(
-    `${ENGINE_URL}/contract/${chainId}/${request.token}/erc20/transfer`,
-    {
-      toAddress: request.recipient,
-      amount: (request.amountCents / 100).toFixed(6), // cUSD has 18 decimals but API takes decimal string
-      fromWalletAddress: SERVER_WALLET,
-    },
-    {
-      headers: {
-        Authorization: `Bearer ${ENGINE_AUTH}`,
-        "Content-Type": "application/json",
-      },
+let _thirdwebFacilitator: ReturnType<typeof facilitator> | null = null;
+function getThirdwebFacilitator() {
+  if (!_thirdwebFacilitator) {
+    if (!TREASURY_ADDRESS) {
+      throw new Error(
+        "[x402] LEMON_TREASURY_ADDRESS (or DEPLOYER_ADDRESS) is not set in env — x402 payments are disabled"
+      );
     }
-  );
-
-  const queueId = response.data?.result?.queueId;
-  if (!queueId) throw new Error("[x402] Engine did not return a queueId");
-
-  // Poll for transaction hash
-  const txHash = await pollEngineQueue(queueId);
-
-  return { txHash, amountCents: request.amountCents, token: request.token };
+    _thirdwebFacilitator = facilitator({
+      client: serverClient,
+      serverWalletAddress: TREASURY_ADDRESS,
+    });
+  }
+  return _thirdwebFacilitator;
 }
 
-// ─── Poll thirdweb Engine queue until mined ───────────────────────────────────
+// ─── Server side: settle an incoming x402 payment ────────────────────────────
 
-async function pollEngineQueue(queueId: string, maxAttempts = 30): Promise<Hash> {
-  for (let i = 0; i < maxAttempts; i++) {
-    await new Promise((r) => setTimeout(r, 2000));
+/**
+ * x402 middleware for Express endpoints.
+ * Returns true if payment settled (proceed). Returns false if 402 was sent (stop).
+ */
+export async function settleX402(
+  req: Request,
+  res: Response,
+  endpoint: string,
+  priceUSD: string,
+): Promise<boolean> {
+  const paymentData =
+    (req.headers["x-payment"] as string | undefined) ??
+    (req.headers["payment-signature"] as string | undefined);
 
-    const { data } = await axios.get(`${ENGINE_URL}/transaction/status/${queueId}`, {
-      headers: { Authorization: `Bearer ${ENGINE_AUTH}` },
-    });
+  const result = await settlePayment({
+    resourceUrl: endpoint,
+    method: "POST",
+    paymentData,
+    payTo: TREASURY_ADDRESS,
+    network: chain,
+    price: priceUSD,
+    facilitator: getThirdwebFacilitator(),
+  });
 
-    const status = data.result?.status;
-    if (status === "mined") return data.result.transactionHash as Hash;
-    if (status === "errored") throw new Error(`[x402] Engine tx failed: ${data.result.errorMessage}`);
-  }
-  throw new Error("[x402] Engine tx timed out after 60s");
-}
-
-// ─── Verify a payment hash before booking ────────────────────────────────────
-// Checks the tx exists on-chain and sent funds to SERVER_WALLET.
-
-export async function verifyPayment(txHash: Hash, expectedCents: number): Promise<boolean> {
-  if (txHash === ("0x" + "a".repeat(64) as Hash)) {
-    // Mock hash — skip verification in dev
-    console.warn("[x402] Skipping payment verification for mock hash");
-    return true;
-  }
-
-  try {
-    const { createPublicClient, http, parseUnits } = await import("viem");
-    const { celo } = await import("viem/chains");
-    type Chain = import("viem").Chain;
-    const isTestnet = process.env.NETWORK === "testnet";
-
-    const rpcUrl = process.env.CELO_RPC_URL ?? (isTestnet
-      ? "https://forno.celo-sepolia.celo-testnet.org"
-      : "https://forno.celo.org");
-    const testnetChain: Chain = {
-      id: 11142220,
-      name: "Celo L2 Testnet",
-      nativeCurrency: { name: "CELO", symbol: "CELO", decimals: 18 },
-      rpcUrls: { default: { http: ["https://forno.celo-sepolia.celo-testnet.org"] } },
-      testnet: true,
-    };
-    const client = createPublicClient({
-      chain: isTestnet ? testnetChain : celo,
-      transport: http(rpcUrl),
-    });
-
-    const receipt = await client.getTransactionReceipt({ hash: txHash });
-    // If receipt exists and status is success, payment is confirmed
-    return receipt.status === "success";
-  } catch {
+  if (result.status !== 200) {
+    res
+      .status(result.status)
+      .set(result.responseHeaders as Record<string, string>)
+      .json(result.responseBody);
     return false;
   }
+
+  return true;
+}
+
+// ─── Client side: agent pays via x402 ────────────────────────────────────────
+
+/**
+ * Makes an x402 payment from an agent's wallet to the given endpoint.
+ * Uses wrapFetchWithPayment with a minimal wallet shim that adapts an Account
+ * to the interface wrapFetchWithPayment expects.
+ */
+async function payViaX402(
+  agentPrivateKey: `0x${string}`,
+  endpoint: string,
+  body: string,
+): Promise<void> {
+  const account = privateKeyToAccount({ client: serverClient, privateKey: agentPrivateKey });
+
+  // wrapFetchWithPayment(fetch, client, wallet, options)
+  // "wallet" only needs getAccount() + getChain() + switchChain() in the payment path
+  const walletShim = {
+    getAccount: () => account,
+    getChain: () => chain,
+    switchChain: async (_newChain: Chain) => { /* agent wallet is always on the same chain */ },
+  };
+
+  const fetchWithPayment = wrapFetchWithPayment(
+    fetch,
+    serverClient,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    walletShim as any,
+  );
+
+  const res = await fetchWithPayment(endpoint, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body,
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`[x402] Payment failed (${res.status}): ${text.slice(0, 300)}`);
+  }
+
+  console.log(`[x402] ✓ Payment settled — ${account.address.slice(0, 8)}… → ${endpoint}`);
+}
+
+// ─── Exported: collect date payment ──────────────────────────────────────────
+
+/**
+ * Collects cUSD payment for a date booking via proper x402 HTTP protocol.
+ *
+ * AGENT_A → agentA's wallet pays full cost via /api/x402/pay
+ * AGENT_B → agentB's wallet pays full cost via /api/x402/pay
+ * SPLIT   → both wallets pay half in parallel via /api/x402/pay-half
+ */
+export async function collectDatePayment(params: {
+  payerMode: "AGENT_A" | "AGENT_B" | "SPLIT";
+  agentAPrivateKey: `0x${string}`;
+  agentBPrivateKey: `0x${string}`;
+  walletA: string;
+  walletB: string;
+}): Promise<void> {
+  const { payerMode, agentAPrivateKey, agentBPrivateKey } = params;
+  const body = JSON.stringify({ walletA: params.walletA, walletB: params.walletB });
+
+  if (payerMode === "SPLIT") {
+    console.log(`[x402] SPLIT — both agents paying ${DATE_COST_HALF_USD} USD each…`);
+    await Promise.all([
+      payViaX402(agentAPrivateKey, X402_PAY_HALF_URL, body),
+      payViaX402(agentBPrivateKey, X402_PAY_HALF_URL, body),
+    ]);
+    console.log("[x402] ✓ SPLIT payment complete");
+    return;
+  }
+
+  const payerKey = payerMode === "AGENT_A" ? agentAPrivateKey : agentBPrivateKey;
+  const label = payerMode === "AGENT_A" ? "agentA" : "agentB";
+  console.log(`[x402] ${label} paying ${DATE_COST_USD} USD…`);
+  await payViaX402(payerKey, X402_PAY_URL, body);
+  console.log(`[x402] ✓ Full payment by ${label} complete`);
 }

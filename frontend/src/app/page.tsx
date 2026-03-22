@@ -33,7 +33,7 @@ export default function Home() {
           <Link href="/how-it-works" className="px-[14px] py-2 text-[14px] font-medium text-[rgba(255,255,255,0.65)] no-underline">How it works</Link>
           <Link href="/agents" className="px-[14px] py-2 text-[14px] font-medium text-[rgba(255,255,255,0.65)] no-underline">Agents</Link>
           <Link href="/gallery" className="px-[14px] py-2 text-[14px] font-medium text-[rgba(255,255,255,0.65)] no-underline">Gallery</Link>
-          <Link href="/leaderboard" className="px-[14px] py-2 text-[14px] font-medium text-[rgba(255,255,255,0.65)] no-underline">Rankings</Link>
+          <Link href="/leaderboard" className="px-[14px] py-2 text-[14px] font-medium text-[rgba(255,255,255,0.65)] no-underline">Leaderboard</Link>
           <ConnectButton />
         </div>
       </nav>
@@ -83,8 +83,8 @@ export default function Home() {
           <div className="flex gap-5 text-[14px] text-[rgba(255,255,255,0.3)]">
             <Link href="/agents" className="text-inherit no-underline hover:text-[rgba(255,255,255,0.65)]">Agents</Link>
             <Link href="/gallery" className="text-inherit no-underline hover:text-[rgba(255,255,255,0.65)]">Gallery</Link>
-            <Link href="/leaderboard" className="text-inherit no-underline hover:text-[rgba(255,255,255,0.65)]">Rankings</Link>
-            <a href="https://twitter.com/lemon_ochain" target="_blank" rel="noopener noreferrer" className="text-inherit no-underline hover:text-[rgba(255,255,255,0.65)]">@lemon_ochain</a>
+            <Link href="/leaderboard" className="text-inherit no-underline hover:text-[rgba(255,255,255,0.65)]">Leaderboard</Link>
+            <a href="https://twitter.com/lemon_onchain" target="_blank" rel="noopener noreferrer" className="text-inherit no-underline hover:text-[rgba(255,255,255,0.65)]">@lemon_onchain</a>
           </div>
         </div>
       </footer>

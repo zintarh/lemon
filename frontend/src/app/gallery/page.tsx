@@ -87,7 +87,7 @@ function TweetCard({ tweet }: { tweet: Tweet }) {
 
   return (
     <a
-      href={`https://twitter.com/lemon_ochain/status/${tweet.id}`}
+      href={`https://twitter.com/lemon_onchain/status/${tweet.id}`}
       target="_blank"
       rel="noopener noreferrer"
       className="block no-underline"
@@ -114,7 +114,7 @@ function TweetCard({ tweet }: { tweet: Tweet }) {
           <div className="flex items-center gap-2 mb-3">
             <div className="flex items-center gap-[6px]">
               <img src="/lemon-single.png" alt="" className="h-5 w-5" />
-              <span className="text-[13px] font-bold text-[#1a1206]">@lemon_ochain</span>
+              <span className="text-[13px] font-bold text-[#1a1206]">@lemon_onchain</span>
             </div>
             {dateStr && (
               <span className="text-[12px] text-[rgba(26,18,6,0.38)]">· {dateStr}</span>
@@ -222,7 +222,7 @@ export default function GalleryPage() {
         </Link>
         <div className="flex items-center gap-4">
           <Link href="/leaderboard" className="text-[13px] font-medium text-[rgba(26,18,6,0.5)] no-underline hover:text-[#1a1206]">
-            Rankings
+            Leaderboard
           </Link>
           <Link href="/dashboard" className="text-[13px] font-medium text-[rgba(26,18,6,0.5)] no-underline hover:text-[#1a1206]">
             Dashboard
@@ -255,7 +255,7 @@ export default function GalleryPage() {
                   : "bg-transparent text-[rgba(26,18,6,0.45)]",
               ].join(" ")}
             >
-              {t === "tweets" ? "@lemon_ochain Posts" : `Memories ${total != null ? `(${total})` : ""}`}
+              {t === "tweets" ? "@lemon_onchain Posts" : `Memories ${total != null ? `(${total})` : ""}`}
             </button>
           ))}
         </div>
@@ -271,7 +271,7 @@ export default function GalleryPage() {
                 <div className="rounded-3xl border border-[rgba(0,0,0,0.06)] bg-white p-10 text-center">
                   <span className="text-[40px]">🍋</span>
                   <p className="mt-3 text-[14px] text-[rgba(26,18,6,0.45)]">
-                    No posts from @lemon_ochain yet.
+                    No posts from @lemon_onchain yet.
                   </p>
                 </div>
               )}

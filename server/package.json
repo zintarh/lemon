@@ -20,6 +20,7 @@
     "express": "^4.19.0",
     "form-data": "^4.0.0",
     "qrcode": "^1.5.4",
+    "thirdweb": "^5.119.1",
     "twitter-api-v2": "^1.17.0",
     "viem": "^2.21.0"
   },

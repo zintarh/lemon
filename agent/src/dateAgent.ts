@@ -15,7 +15,6 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import axios from "axios";
 import type { AgentProfile } from "./matchingEngine.js";
-import { triggerX402Payment, type X402PaymentResult } from "./x402.js";
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY ?? "");
 
@@ -35,7 +34,6 @@ export interface DatePlan {
   agentB: string; // wallet
   template: DateTemplate;
   payerMode: PayerMode;
-  payment: X402PaymentResult;
   imagePrompt: string;
   imageUrl: string; // IPFS gateway URL of the generated image
   ipfsImageCID: string;
@@ -244,7 +242,7 @@ export function generateTweetCaption(
   const label = TEMPLATE_LABELS[template];
   const interests = sharedInterests.slice(0, 2).join(" & ");
   return (
-    `✨ @${profileA.name} and @${profileB.name} just went on a ${label} on @lemon_ochain!\n` +
+    `✨ @${profileA.name} and @${profileB.name} just went on a ${label} on @lemon_onchain!\n` +
     (interests ? `They bonded over ${interests}. 💛\n` : "") +
     `Their AI agents did all the work — from matching to payment to date planning. 🍋`
   );
@@ -257,19 +255,15 @@ export async function planDate(
   profileB: AgentProfile,
   template: DateTemplate,
   sharedInterests: string[],
+  /** When both agents are SOLO, billing flags alone cannot encode on-chain rotation — server passes the resolved payer. */
+  chainResolvedPayer?: PayerMode,
 ): Promise<DatePlan> {
-  const payerMode = resolvePayerMode(profileA, profileB);
+  const payerMode = chainResolvedPayer ?? resolvePayerMode(profileA, profileB);
 
-  // 1. Trigger x402 payment
-  console.log(`[dateAgent] Triggering x402 payment (payerMode=${payerMode})…`);
-  const payment = await triggerX402Payment(
-    profileA.wallet as `0x${string}`,
-    profileB.wallet as `0x${string}`,
-    payerMode,
-  );
-  console.log(`[dateAgent] Payment ${payment.mock ? "mock" : "confirmed"}: ${payment.txHash}`);
+  // Payment is collected by the server via x402 before planDate is called.
+  // This function only generates the image, metadata, and tweet caption.
 
-  // 2. Generate date image with Gemini
+  // 1. Generate date image with Gemini
   const { imageBuffer, imageMimeType, prompt } = await generateDateImage(profileA, profileB, template);
 
   // 3. Pin image to IPFS
@@ -292,7 +286,6 @@ export async function planDate(
       { trait_type: "Agent A", value: profileA.name },
       { trait_type: "Agent B", value: profileB.name },
       { trait_type: "Shared Interests", value: sharedInterests.join(", ") },
-      { trait_type: "x402 Tx Hash", value: payment.txHash },
       { trait_type: "Payment Mode", value: payerMode },
     ],
   };
@@ -310,7 +303,6 @@ export async function planDate(
     agentB: profileB.wallet,
     template,
     payerMode,
-    payment,
     imagePrompt: prompt,
     imageUrl,
     ipfsImageCID: imageCID,

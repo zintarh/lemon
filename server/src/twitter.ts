@@ -1,7 +1,7 @@
 /**
  * twitter.ts
  *
- * Posts date memory images to the official @lemon_ochain X (Twitter) account
+ * Posts date memory images to the official @lemon_onchain X (Twitter) account
  * after a date is completed. Downloads the image from IPFS gateway, uploads
  * it as media, then posts the tweet with the auto-generated caption.
  */
@@ -36,7 +36,7 @@ async function uploadMedia(imageBuffer: Buffer): Promise<string> {
 }
 
 /**
- * Posts the date memory image + caption to @lemon_ochain.
+ * Posts the date memory image + caption to @lemon_onchain.
  */
 export async function postDateTweet(params: {
   ipfsImageCID: string;
@@ -53,6 +53,6 @@ export async function postDateTweet(params: {
   const tweetId = tweet.data.id;
   return {
     tweetId,
-    tweetUrl: `https://twitter.com/lemon_ochain/status/${tweetId}`,
+    tweetUrl: `https://twitter.com/lemon_onchain/status/${tweetId}`,
   };
 }

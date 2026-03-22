@@ -7,6 +7,7 @@ import { useAccount, usePublicClient } from "wagmi";
 import { useWriteContract, useWaitForTransactionReceipt } from "wagmi";
 import { parseUnits } from "viem";
 import { ConnectButton } from "@/components/ConnectButton";
+import { LemonPulseLoader } from "@/components/LemonPulseLoader";
 import { useRegisterAgent, type BillingMode } from "@/hooks/useRegisterAgent";
 import { parseError } from "@/lib/errors";
 import { useRouter } from "next/navigation";
@@ -409,7 +410,7 @@ export default function OnboardPage() {
 
   if (!ready || !authenticated) return (
     <div className="h-[100svh] flex items-center justify-center bg-[#FAFAF8]">
-      <div className="h-8 w-8 animate-spin rounded-full border-2 border-[#D6820A] border-t-transparent" />
+      <LemonPulseLoader className="h-10 w-10" />
     </div>
   );
 
@@ -587,7 +588,7 @@ export default function OnboardPage() {
                   className="absolute inset-0 w-full h-full object-cover"
                 />
               )}
-              <div className="absolute inset-0 bg-black/30" />
+              <div className="absolute inset-0 bg-[#1a1206]/[0.10]" />
               <p className="absolute bottom-[7px] left-[10px] font-extrabold text-[clamp(10px,1.3vh,13px)] text-white m-0 tracking-[-0.02em]">
                 {template?.title}
               </p>
@@ -612,7 +613,7 @@ export default function OnboardPage() {
                 <div className={[
                   "shrink-0 rounded-full flex items-center justify-center font-extrabold transition-all duration-200",
                   "w-[clamp(20px,2.8vh,26px)] h-[clamp(20px,2.8vh,26px)] text-[clamp(9px,1.1vh,11px)]",
-                  isDone ? "bg-green-600 text-white" : isActive ? "bg-[#D6820A] text-white" : "bg-black/[0.07] text-[#1a1206]/30",
+                  isDone ? "bg-green-600 text-white" : isActive ? "bg-[#D6820A] text-white" : "bg-[#E6DDD0] text-[#1a1206]/30",
                 ].join(" ")}>
                   {isDone ? "✓" : s.n}
                 </div>
@@ -661,7 +662,7 @@ export default function OnboardPage() {
                   style={{ background: avatarPreview ? "transparent" : `linear-gradient(135deg, ${template?.accent ?? "#e8a820"}, ${template?.accentTo ?? "#c8820a"})` }}
                 >
                   {avatarLoading
-                    ? <div className="w-[18px] h-[18px] rounded-full border-2 border-white/80 border-t-transparent animate-spin" />
+                    ? <LemonPulseLoader className="h-5 w-5 drop-shadow-md brightness-0 invert" />
                     : avatarPreview
                     ? <img src={avatarPreview} alt="Avatar" className="w-full h-full object-cover" />
                     : <span className="text-[clamp(9px,1.2vh,11px)] font-bold text-white/85 text-center leading-[1.4]">Add<br />photo</span>

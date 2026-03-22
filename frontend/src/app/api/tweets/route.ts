@@ -4,7 +4,7 @@ export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 const TWITTER_BEARER_TOKEN = process.env.TWITTER_BEARER_TOKEN;
-const LEMON_TWITTER_USERNAME = "lemon_ochain";
+const LEMON_TWITTER_USERNAME = "lemon_onchain";
 const MAX_RESULTS = 20;
 
 export interface Tweet {
@@ -21,7 +21,7 @@ export async function GET() {
   }
 
   try {
-    // 1. Resolve user ID for @lemon_ochain
+    // 1. Resolve user ID for @lemon_onchain
     const userRes = await fetch(
       `https://api.twitter.com/2/users/by/username/${LEMON_TWITTER_USERNAME}`,
       { headers: { Authorization: `Bearer ${TWITTER_BEARER_TOKEN}` } }
@@ -35,7 +35,7 @@ export async function GET() {
     const userData = await userRes.json();
     const userId = userData?.data?.id;
     if (!userId) {
-      return NextResponse.json({ tweets: [], error: "Could not find @lemon_ochain user ID" }, { status: 200 });
+      return NextResponse.json({ tweets: [], error: "Could not find @lemon_onchain user ID" }, { status: 200 });
     }
 
     // 2. Fetch recent tweets with media expansions

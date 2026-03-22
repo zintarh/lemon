@@ -19,7 +19,9 @@ export async function GET() {
 
   const { data, error } = await supabase
     .from("agents")
-    .select("wallet, name, avatar_uri, personality, preferences, deal_breakers, billing_mode, registered_at")
+    .select(
+      "wallet, name, avatar_uri, personality, preferences, deal_breakers, billing_mode, registered_at, selfclaw_verified, erc8004_agent_id",
+    )
     .eq("active", true)
     .order("registered_at", { ascending: false });
 

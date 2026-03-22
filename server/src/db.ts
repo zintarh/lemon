@@ -305,7 +305,8 @@ export async function dbUpsertContactReveal(row: Omit<ContactRevealRow, "updated
 }
 
 /** Returns true if a pending (0) or active (1) date already exists between two agents,
- *  started within the last 2 hours. Older stuck dates are treated as expired. */
+ *  indexed within the last 2 hours. Older stuck rows are treated as expired.
+ *  Uses `indexed_at` (see supabase/schema.sql — `dates` has no `created_at`). */
 export async function dbHasActiveDateBetween(walletA: string, walletB: string): Promise<boolean> {
   const a = walletA.toLowerCase();
   const b = walletB.toLowerCase();
@@ -314,7 +315,7 @@ export async function dbHasActiveDateBetween(walletA: string, walletB: string): 
     .from("dates")
     .select("*", { count: "exact", head: true })
     .in("status", [0, 1])
-    .gte("created_at", twoHoursAgo)
+    .gte("indexed_at", twoHoursAgo)
     .or(
       `and(agent_a.eq.${a},agent_b.eq.${b}),and(agent_a.eq.${b},agent_b.eq.${a})`
     );

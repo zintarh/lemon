@@ -65,7 +65,7 @@ function MatchOverlay({ profile, onClose }: { profile: Profile; onClose: () => v
       exit={{ opacity: 0 }}
       style={{
         position: "fixed", inset: 0, zIndex: 200,
-        background: "rgba(0,0,0,0.5)", backdropFilter: "blur(12px)",
+        background: "rgba(253, 250, 246, 0.92)", backdropFilter: "blur(12px)",
         display: "flex", alignItems: "center", justifyContent: "center", padding: 20,
       }}
     >

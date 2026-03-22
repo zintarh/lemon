@@ -7,6 +7,7 @@ import { useAccount } from "wagmi";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { ConnectButton } from "@/components/ConnectButton";
+import { LemonPulseLoader } from "@/components/LemonPulseLoader";
 import { useAgentProfile } from "@/hooks/useAgentProfile";
 import { useUpdateAgent } from "@/hooks/useUpdateAgent";
 import { parseError } from "@/lib/errors";
@@ -109,7 +110,7 @@ function VerifyIdentityModal({
   }, [polling, wallet]);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm px-4">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#F5F0E8]/90 backdrop-blur-md px-4">
       <div className="w-full max-w-sm rounded-3xl bg-white p-6 shadow-2xl flex flex-col gap-5">
         <div className="flex items-start justify-between">
           <div>
@@ -133,7 +134,7 @@ function VerifyIdentityModal({
         <div className="flex items-center justify-center min-h-[200px]">
           {loading && (
             <div className="flex flex-col items-center gap-3">
-              <div className="h-8 w-8 rounded-full border-2 border-[#D6820A] border-t-transparent animate-spin" />
+              <LemonPulseLoader className="h-10 w-10" />
               <p className="text-[12px] text-[#1a1206]/40">Generating QR code…</p>
             </div>
           )}
@@ -216,8 +217,8 @@ export default function SettingsPage() {
   const { address } = useAccount();
   const router = useRouter();
 
-  const { data: profile, isLoading: profileLoading } = useAgentProfile(address);
-  const { update, isPending, isConfirming, isSuccess, error } = useUpdateAgent();
+  const { data: profile, isLoading: profileLoading, refetch: refetchProfile } = useAgentProfile(address);
+  const { update, isPending, isConfirming, isSuccess, error, hash: updateTxHash } = useUpdateAgent();
 
   /** Which sidebar section is highlighted (jump nav — not a forced wizard). */
   const [activeSection, setActiveSection] = useState<SettingsSectionIndex>(0);
@@ -251,6 +252,8 @@ export default function SettingsPage() {
   const [contactPhone, setContactPhone] = useState("");
   const [revealPriceCents, setRevealPriceCents] = useState(0);
   const [contactSaving, setContactSaving] = useState(false);
+  /** Avoid double sync / duplicate toasts when isSuccess stays true for the same tx */
+  const lastSyncedUpdateHash = useRef<string | undefined>(undefined);
 
   useEffect(() => {
     if (ready && !authenticated) router.replace("/");
@@ -274,20 +277,22 @@ export default function SettingsPage() {
   useEffect(() => {
     if (!address) return;
     fetch(`/api/settings/contact?wallet=${address}`)
-      .then((r) => r.json())
-      .then(
-        (d: {
+      .then(async (r) => {
+        if (!r.ok) return;
+        return r.json() as Promise<{
           telegram_handle?: string;
           email?: string;
           phone?: string;
           reveal_price_cents?: number;
-        }) => {
-          setTgHandle(d.telegram_handle ?? "");
-          setContactEmail(d.email ?? "");
-          setContactPhone(d.phone ?? "");
-          setRevealPriceCents(d.reveal_price_cents ?? 0);
-        }
-      )
+        }>;
+      })
+      .then((d) => {
+        if (!d) return;
+        setTgHandle(d.telegram_handle ?? "");
+        setContactEmail(d.email ?? "");
+        setContactPhone(d.phone ?? "");
+        setRevealPriceCents(d.reveal_price_cents ?? 0);
+      })
       .catch(() => {});
   }, [address]);
 
@@ -396,9 +401,43 @@ export default function SettingsPage() {
     if (error) toast.error("Update failed", { description: parseError(error) });
   }, [error]);
 
+  /** On-chain updateProfile → pull same data from contract into Supabase (matcher reads DB). */
   useEffect(() => {
-    if (isSuccess) toast.success("Profile updated on-chain");
-  }, [isSuccess]);
+    if (!isSuccess || !updateTxHash || !address) return;
+    if (lastSyncedUpdateHash.current === updateTxHash) return;
+    lastSyncedUpdateHash.current = updateTxHash;
+
+    let cancelled = false;
+    (async () => {
+      let synced = false;
+      for (let attempt = 1; attempt <= 4; attempt++) {
+        try {
+          const r = await fetch(`${SERVER}/api/agents/${address}/sync-profile`, { method: "POST" });
+          if (r.ok) {
+            synced = true;
+            break;
+          }
+        } catch {
+          /* retry */
+        }
+        await new Promise((r) => setTimeout(r, 2000));
+        if (cancelled) return;
+      }
+      if (cancelled) return;
+      await refetchProfile();
+      if (synced) {
+        toast.success("Profile updated", { description: "On-chain and server are in sync." });
+      } else {
+        toast.warning("Updated on-chain", {
+          description: "Server sync is delayed — matching may use old prefs until sync succeeds. Retry from dashboard.",
+        });
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isSuccess, updateTxHash, address, refetchProfile]);
 
   const avatarSrc = avatarPreview ?? avatarUriToDisplayUrl(profile?.avatarURI);
 
@@ -407,7 +446,7 @@ export default function SettingsPage() {
   if (!ready || !authenticated) {
     return (
       <div className="h-[100svh] flex items-center justify-center bg-[#FAFAF8]">
-        <div className="h-8 w-8 animate-spin rounded-full border-2 border-[#D6820A] border-t-transparent" />
+        <LemonPulseLoader className="h-10 w-10" />
       </div>
     );
   }
@@ -458,7 +497,7 @@ export default function SettingsPage() {
 
       {profileLoading || !hydrated ? (
         <div className="flex-1 flex items-center justify-center">
-          <div className="h-7 w-7 animate-spin rounded-full border-2 border-[#D6820A] border-t-transparent" />
+          <LemonPulseLoader className="h-9 w-9" />
         </div>
       ) : (
         <>
@@ -502,7 +541,7 @@ export default function SettingsPage() {
                       {profile?.name?.slice(0, 1) ?? "?"}
                     </span>
                   )}
-                  <div className="absolute inset-0 bg-black/25 pointer-events-none" />
+                  <div className="absolute inset-0 bg-[#1a1206]/[0.08] pointer-events-none" />
                   <p className="absolute bottom-[7px] left-[10px] font-extrabold text-[clamp(10px,1.3vh,13px)] text-white m-0 tracking-[-0.02em] z-[1] truncate max-w-[90%]">
                     {profile?.name ?? "Agent"}
                   </p>
@@ -530,7 +569,7 @@ export default function SettingsPage() {
                       className={[
                         "shrink-0 rounded-full flex items-center justify-center font-extrabold transition-all duration-200",
                         "w-[clamp(20px,2.8vh,26px)] h-[clamp(20px,2.8vh,26px)] text-[clamp(9px,1.1vh,11px)]",
-                        isActive ? "bg-[#D6820A] text-white" : "bg-black/[0.07] text-[#1a1206]/30",
+                        isActive ? "bg-[#D6820A] text-white" : "bg-[#E6DDD0] text-[#1a1206]/30",
                       ].join(" ")}
                     >
                       {s.n}
@@ -561,8 +600,8 @@ export default function SettingsPage() {
                   Your profile
                 </h2>
                 <p className="text-[clamp(12px,1.4vh,14px)] text-[#1a1206]/40 m-0 mt-1">
-                  Three sections — scroll or use the sidebar to jump. On-chain profile &amp; matching update with{" "}
-                  <span className="font-semibold text-[#1a1206]/55">Update my agent</span>. Contact is step 03 and saves separately.
+                  Three sections — scroll or use the sidebar to jump.{" "}
+                  <span className="font-semibold text-[#1a1206]/55">Update my agent</span> saves to the contract, then syncs the same data to the server for matching. Contact is step 03 and saves separately.
                 </p>
               </div>
 
@@ -586,7 +625,7 @@ export default function SettingsPage() {
                         }}
                       >
                         {avatarLoading ? (
-                          <div className="w-[18px] h-[18px] rounded-full border-2 border-white/80 border-t-transparent animate-spin" />
+                          <LemonPulseLoader className="h-5 w-5 drop-shadow-md brightness-0 invert" />
                         ) : avatarSrc ? (
                           /* eslint-disable-next-line @next/next/no-img-element */
                           <img src={avatarSrc} alt="Avatar" className="w-full h-full object-cover" />

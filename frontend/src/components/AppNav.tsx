@@ -22,7 +22,7 @@ export function AppNav({
           Agents
         </Link>
         <Link href="/leaderboard" className="btn btn-ghost text-sm py-2 px-3 sm:px-4">
-          Rankings
+          Leaderboard
         </Link>
         {showDashboard && (
           <Link href="/dashboard" className="btn btn-ghost text-sm py-2 px-3 sm:px-4 hidden sm:inline-flex">

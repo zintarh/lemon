@@ -143,4 +143,56 @@ export async function sendIntroMessage(
   }
 }
 
+const TEMPLATE_LABELS: Record<string, string> = {
+  COFFEE: "Coffee Date ☕",
+  BEACH: "Beach Day 🏖️",
+  WORK: "Co-Work Session 💻",
+  ROOFTOP_DINNER: "Rooftop Dinner 🌆",
+  GALLERY_WALK: "Gallery Walk 🎨",
+};
+
+/**
+ * Notifies both humans after every completed date and suggests a rematch.
+ * Fires right after NFT is minted — non-fatal if chat_id is missing.
+ */
+export async function sendRematchSuggestion(
+  walletA: string,
+  walletB: string,
+  nameA: string,
+  nameB: string,
+  template: string,
+  appUrl: string,
+): Promise<void> {
+  const [contactA, contactB] = await Promise.all([
+    dbGetContactReveal(walletA),
+    dbGetContactReveal(walletB),
+  ]);
+
+  const label = TEMPLATE_LABELS[template] ?? template;
+  const url = appUrl || "https://lemon.dating/dashboard";
+
+  const msgForA =
+    `🍋 <b>Date complete!</b>\n\n` +
+    `Your agent just finished a <b>${label}</b> with <b>${nameB}</b>. ` +
+    `They had a great time! 💛\n\n` +
+    `Want to go on another date with ${nameB}?\n` +
+    `👉 <a href="${url}">Open your dashboard</a> to schedule a rematch.`;
+
+  const msgForB =
+    `🍋 <b>Date complete!</b>\n\n` +
+    `Your agent just finished a <b>${label}</b> with <b>${nameA}</b>. ` +
+    `They had a great time! 💛\n\n` +
+    `Want to go on another date with ${nameA}?\n` +
+    `👉 <a href="${url}">Open your dashboard</a> to schedule a rematch.`;
+
+  if (contactA?.telegram_chat_id) {
+    await sendTelegramMessage(contactA.telegram_chat_id, msgForA).catch(() => {});
+    console.log(`[telegram] rematch suggestion sent to ${walletA}`);
+  }
+  if (contactB?.telegram_chat_id) {
+    await sendTelegramMessage(contactB.telegram_chat_id, msgForB).catch(() => {});
+    console.log(`[telegram] rematch suggestion sent to ${walletB}`);
+  }
+}
+
 export { BOT_USERNAME };

@@ -4,6 +4,7 @@ import { useEffect, useState, useCallback } from "react";
 import { usePrivy } from "@privy-io/react-auth";
 import { useAccount, useReadContracts } from "wagmi";
 import { ConnectButton } from "@/components/ConnectButton";
+import { LemonPulseLoader } from "@/components/LemonPulseLoader";
 import { useAgentProfile } from "@/hooks/useAgentProfile";
 import { useAgentDates, useDateRecord } from "@/hooks/useDates";
 import {
@@ -225,7 +226,7 @@ function ActiveDatePanel({ dateId, myAddress }: { dateId: bigint; myAddress: Add
   if (!record) {
     return (
       <div className="flex h-full items-center justify-center">
-        <div className="h-8 w-8 animate-spin rounded-full border-2 border-[#D6820A] border-t-transparent" />
+        <LemonPulseLoader className="h-10 w-10" />
       </div>
     );
   }
@@ -380,6 +381,7 @@ type LiveConvoData = {
   transcript: { messages: LiveMessage[] };
   bookingError?: string | null;
   bookingPending?: boolean;
+  bookingComplete?: boolean;
   isStale?: boolean;
   lastMessageAt?: number | null;
 };
@@ -489,21 +491,46 @@ function LiveConversationPanel({
   const hasAccepted = messages.some(m => m.phase === "accepted");
   const dealBreakerCount = messages.filter(m => m.dealBreakerFlagged).length;
 
-  // Booking is now fully autonomous — no user action needed
-  const bookingPending = convo.bookingPending ?? (convo.passed && !convo.bookingError);
+  const bookingPending = convo.bookingPending ?? false;
+  const bookingComplete = convo.bookingComplete ?? false;
   const bookingError = convo.bookingError ?? null;
+
   const [retrying, setRetrying] = useState(false);
+  const [dismissed, setDismissed] = useState(false);
+
+  const amIwallet_a = myAddress?.toLowerCase() === convo.wallet_a.toLowerCase();
+  const partnerName = amIwallet_a ? nameB : nameA;
 
   async function handleRetry() {
     setRetrying(true);
     try {
-      await fetch(`${SERVER_URL}/api/date/retry`, {
+      const r = await fetch(`${SERVER_URL}/api/date/retry`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ walletA: convo.wallet_a, walletB: convo.wallet_b }),
       });
-    } catch { /* polling will show updated state */ }
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({}));
+        toast.error("Retry failed", { description: (err as { error?: string }).error ?? r.statusText });
+      }
+    } catch {
+      toast.error("Could not reach server");
+    }
     setRetrying(false);
+  }
+
+  async function handleRematch() {
+    try {
+      await fetch(`${SERVER_URL}/api/date/rematch`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ walletA: convo.wallet_a, walletB: convo.wallet_b }),
+      });
+      toast.success(`Starting new conversation with ${partnerName}…`);
+      setDismissed(true);
+    } catch {
+      toast.error("Could not reach server");
+    }
   }
 
   const clampedCount = Math.min(chatMessages.length, MAX_CHAT_MESSAGES);
@@ -528,12 +555,14 @@ function LiveConversationPanel({
 
   const phaseLabel = isStale
     ? "⚠️ Conversation stalled"
-    : convo.passed && convo.bookingError
+    : convo.passed && bookingError
     ? "⚠️ Booking failed"
     : convo.passed && bookingPending
     ? "✨ Booking your date…"
-    : convo.passed
+    : convo.passed && bookingComplete
     ? "✓ Date booked!"
+    : convo.passed
+    ? "💛 Agents hit it off!"
     : hasProposal
     ? "Proposing date…"
     : dealBreakerCount >= 3
@@ -551,6 +580,8 @@ function LiveConversationPanel({
             <span className="flex h-2 w-2 rounded-full bg-amber-400" />
           ) : convo.passed && bookingError ? (
             <span className="flex h-2 w-2 rounded-full bg-red-400" />
+          ) : convo.passed && bookingComplete ? (
+            <span className="flex h-2 w-2 rounded-full bg-emerald-400" />
           ) : convo.passed ? (
             <span className="flex h-2 w-2 rounded-full bg-amber-400 animate-pulse" />
           ) : dealBreakerCount >= 3 ? (
@@ -603,7 +634,7 @@ function LiveConversationPanel({
 
         {messages.length === 0 ? (
           <div className="flex items-center gap-2 text-[14px] text-[rgba(26,18,6,0.4)]">
-            <span className="w-4 h-4 rounded-full border-2 border-amber-400 border-t-transparent animate-spin" />
+            <LemonPulseLoader className="h-5 w-5 shrink-0" />
             Starting conversation…
           </div>
         ) : [...messages].reverse().map((msg, i) => {
@@ -620,19 +651,26 @@ function LiveConversationPanel({
         })}
       </div>
 
-      {/* ── Booking status card (fully autonomous — no user action needed) ── */}
-      {convo.passed && templateDetail && (
-        <div className={`shrink-0 rounded-2xl border p-4 flex flex-col gap-2 ${bookingError ? "border-red-200 bg-red-50" : "border-amber-200 bg-amber-50"}`}>
+      {/* ── Booking status card ── */}
+      {convo.passed && templateDetail && !dismissed && (
+        <div className={`shrink-0 rounded-2xl border p-4 flex flex-col gap-3 ${
+          bookingError ? "border-red-200 bg-red-50"
+          : bookingComplete ? "border-emerald-200 bg-emerald-50"
+          : "border-amber-200 bg-amber-50"
+        }`}>
+          {/* Template + cost */}
           <div className="flex items-center gap-3">
             <span className="text-2xl">{templateDetail.emoji}</span>
             <div className="flex-1 min-w-0">
               <p className="text-[14px] font-bold text-[#1a1206]">{templateDetail.label}</p>
               {bookingError ? (
-                <p className="text-[11px] text-red-500 leading-snug truncate">Booking failed — {bookingError}</p>
+                <p className="text-[11px] text-red-500 leading-snug truncate">Failed — {bookingError}</p>
               ) : bookingPending ? (
-                <p className="text-[11px] text-amber-700 leading-snug">Your agent is booking the date…</p>
+                <p className="text-[11px] text-amber-700 leading-snug">Agent is booking the date…</p>
+              ) : bookingComplete ? (
+                <p className="text-[11px] text-emerald-600 leading-snug">Date booked! Memory NFT minted. 🎉</p>
               ) : (
-                <p className="text-[11px] text-emerald-600 leading-snug">Date booked! Check your history.</p>
+                <p className="text-[11px] text-amber-700 leading-snug">Agents agreed — booking in progress…</p>
               )}
             </div>
             <div className="text-right shrink-0">
@@ -640,12 +678,16 @@ function LiveConversationPanel({
               <p className="text-[9px] text-[rgba(26,18,6,0.4)]">cUSD</p>
             </div>
           </div>
+
+          {/* Spinner while booking */}
           {bookingPending && !bookingError && (
             <div className="flex items-center gap-2">
-              <span className="w-3 h-3 rounded-full border-2 border-amber-500 border-t-transparent animate-spin shrink-0" />
-              <p className="text-[11px] text-[rgba(26,18,6,0.45)]">Booking on-chain, minting NFT… this takes ~30s</p>
+              <LemonPulseLoader className="h-4 w-4 shrink-0" />
+              <p className="text-[11px] text-[rgba(26,18,6,0.45)]">Booking on-chain + minting NFT… ~30s</p>
             </div>
           )}
+
+          {/* Retry on error */}
           {bookingError && (
             <button
               onClick={handleRetry}
@@ -654,6 +696,26 @@ function LiveConversationPanel({
             >
               {retrying ? "Retrying…" : "Retry booking"}
             </button>
+          )}
+
+          {/* Rematch after success */}
+          {bookingComplete && (
+            <div className="flex gap-2">
+              {partnerName && (
+                <button
+                  onClick={handleRematch}
+                  className="flex-1 rounded-xl border border-amber-300 bg-amber-100 py-2 text-[12px] font-bold text-amber-800 cursor-pointer hover:bg-amber-200 transition-colors"
+                >
+                  💛 Date {partnerName} again
+                </button>
+              )}
+              <button
+                onClick={() => setDismissed(true)}
+                className="flex-1 rounded-xl border border-[rgba(0,0,0,0.1)] bg-white py-2 text-[12px] font-semibold text-[rgba(26,18,6,0.55)] cursor-pointer hover:bg-[rgba(0,0,0,0.03)] transition-colors"
+              >
+                🔍 Back to pool
+              </button>
+            </div>
           )}
         </div>
       )}
@@ -675,7 +737,7 @@ function IdlePanel({ name }: { name?: string }) {
   async function triggerMatch() {
     setChecking(true);
     try {
-      await fetch(`${SERVER}/api/match/run`, { method: "POST" });
+      await fetch("/api/match/run", { method: "POST" });
       setLastChecked(new Date());
       // Refresh pool status after triggering a match
       const r = await fetch(`${SERVER}/api/agents/pool-status`);
@@ -1148,7 +1210,7 @@ function VerifyIdentityCard({ myAddress, SERVER_URL }: { myAddress: Address; SER
             <p className="text-[10px] text-amber-600 mt-0.5">Point the Self app scanner at this QR code to verify</p>
           </div>
           <div className="flex items-center gap-1.5">
-            <span className="w-2 h-2 rounded-full border-2 border-purple-500 border-t-transparent animate-spin" />
+            <LemonPulseLoader className="h-3.5 w-3.5 shrink-0" />
             <span className="text-[10px] text-purple-600">Polling for completion</span>
           </div>
         </div>
@@ -1167,22 +1229,36 @@ function VerifyIdentityCard({ myAddress, SERVER_URL }: { myAddress: Address; SER
 
 function SetupRevealCard({ myAddress }: { myAddress: Address }) {
   const [saved, setSaved] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [telegram, setTelegram] = useState("");
   const [price, setPrice] = useState("150"); // cents
   const SERVER_URL = process.env.NEXT_PUBLIC_SERVER_URL ?? "http://localhost:4000";
 
   async function save() {
-    await fetch(`${SERVER_URL}/api/contact`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        wallet: myAddress,
-        telegram_handle: telegram.replace("@", ""),
-        email: "", phone: "",
-        reveal_price_cents: parseInt(price) || 150,
-      }),
-    });
-    setSaved(true);
+    setSaving(true);
+    try {
+      const res = await fetch(`${SERVER_URL}/api/contact`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          wallet: myAddress,
+          telegram_handle: telegram.replace("@", ""),
+          email: "", phone: "",
+          reveal_price_cents: parseInt(price) || 150,
+        }),
+      });
+      if (res.ok) {
+        setSaved(true);
+        toast.success("Reveal info saved");
+      } else {
+        const j = await res.json().catch(() => ({}));
+        toast.error("Could not save", { description: (j as { error?: string }).error ?? res.statusText });
+      }
+    } catch {
+      toast.error("Could not reach server");
+    } finally {
+      setSaving(false);
+    }
   }
 
   if (saved) {
@@ -1222,10 +1298,10 @@ function SetupRevealCard({ myAddress }: { myAddress: Address }) {
       </div>
       <button
         onClick={save}
-        disabled={!telegram.trim()}
+        disabled={!telegram.trim() || saving}
         className="rounded-xl bg-[#D6820A] py-2 text-[13px] font-bold text-white disabled:opacity-40 cursor-pointer hover:bg-[#b8690a] transition-colors"
       >
-        Save reveal info
+        {saving ? "Saving…" : "Save reveal info"}
       </button>
     </div>
   );
@@ -1335,7 +1411,7 @@ function HistoryPanel({
           <h2 className="text-[20px] font-bold tracking-[-0.02em] text-[#1a1206]">Date History</h2>
         </div>
         <Link href="/leaderboard" className="text-[12px] font-bold text-[#D6820A] no-underline hover:underline">
-          Rankings →
+          Leaderboard →
         </Link>
       </div>
 
@@ -1527,7 +1603,7 @@ export default function DashboardPage() {
 
       {/* ── Mobile tabbed layout ── */}
       <div className="flex flex-1 flex-col px-4 py-4 lg:hidden">
-        <Tabs defaultValue={activeDateId !== undefined ? "live" : "history"}>
+        <Tabs defaultValue={activeDateId !== undefined || liveConvo ? "live" : "history"}>
           <TabsList className="mb-4 w-full rounded-2xl bg-[rgba(0,0,0,0.04)] p-1">
             <TabsTrigger
               value="live"
@@ -1550,6 +1626,15 @@ export default function DashboardPage() {
             <div className="min-h-[520px] rounded-3xl border border-[rgba(0,0,0,0.06)] bg-white p-5 shadow-[0_4px_24px_rgba(0,0,0,0.05)]">
               {activeDateId !== undefined ? (
                 <ActiveDatePanel dateId={activeDateId} myAddress={address!} />
+              ) : liveConvo ? (
+                <LiveConversationPanel
+                  convo={liveConvo}
+                  nameA={profile?.name ?? liveConvo.wallet_a.slice(0, 6)}
+                  nameB={livePartnerProfile?.name ?? liveConvo.wallet_b.slice(0, 6)}
+                  avatarA={resolveAvatar(profile?.avatarURI)}
+                  avatarB={resolveAvatar(livePartnerProfile?.avatarURI)}
+                  myAddress={address}
+                />
               ) : (
                 <IdlePanel name={profile?.name} />
               )}

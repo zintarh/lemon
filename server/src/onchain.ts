@@ -11,6 +11,7 @@ import {
   createWalletClient,
   http,
   parseAbi,
+  parseUnits,
   getContract,
   type Address,
   type Hash,
@@ -268,6 +269,52 @@ export async function setOperatorKey(userWallet: Address, operatorWallet: Addres
 
 export async function getAllAgents(): Promise<Address[]> {
   return await agentContract().read.getAllAgents() as Address[];
+}
+
+// ─── cUSD payment helper ─────────────────────────────────────────────────────
+
+const erc20TransferAbi = parseAbi([
+  "function transfer(address to, uint256 amount) returns (bool)",
+]);
+
+/**
+ * Transfers cUSD directly from an agent wallet to the Lemon treasury.
+ * Much simpler than x402 for server-controlled wallets — no HTTP roundtrip.
+ * SPLIT: both agents pay half in parallel.
+ */
+export async function collectPayment(params: {
+  payerMode: "AGENT_A" | "AGENT_B" | "SPLIT";
+  agentAPrivateKey: `0x${string}`;
+  agentBPrivateKey: `0x${string}`;
+  treasuryAddress: Address;
+  cUSDAddress: Address;
+  amountUSD: string; // e.g. "1.00"
+}): Promise<void> {
+  const { payerMode, agentAPrivateKey, agentBPrivateKey, treasuryAddress, cUSDAddress, amountUSD } = params;
+
+  async function transfer(fromKey: `0x${string}`, amount: string): Promise<void> {
+    const client = createAgentWalletClient(fromKey);
+    const hash = await client.writeContract({
+      address: cUSDAddress,
+      abi: erc20TransferAbi,
+      functionName: "transfer",
+      args: [treasuryAddress, parseUnits(amount, 18)],
+    });
+    await publicClient.waitForTransactionReceipt({ hash });
+    const addr = (await import("viem/accounts")).privateKeyToAddress(fromKey);
+    console.log(`[payment] ✓ ${amount} cUSD transferred from ${addr.slice(0, 8)}… → treasury`);
+  }
+
+  if (payerMode === "SPLIT") {
+    const half = (parseFloat(amountUSD) / 2).toFixed(6);
+    await Promise.all([
+      transfer(agentAPrivateKey, half),
+      transfer(agentBPrivateKey, half),
+    ]);
+  } else {
+    const payerKey = payerMode === "AGENT_A" ? agentAPrivateKey : agentBPrivateKey;
+    await transfer(payerKey, amountUSD);
+  }
 }
 
 export type AgentProfile = {

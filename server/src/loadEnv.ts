@@ -10,5 +10,6 @@ import { fileURLToPath } from "url";
 import { dirname, resolve } from "path";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-// server/src -> server -> monorepo root
+// Try monorepo root first (.env two levels up), then local .env — both are optional in production
 config({ path: resolve(__dirname, "../../.env") });
+config({ path: resolve(__dirname, "../.env") });

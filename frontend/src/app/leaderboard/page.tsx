@@ -24,7 +24,7 @@ interface LeaderboardEntry {
 
 type SortKey = "zestScore" | "datesCompleted" | "totalSpentCents" | "avgMatchScore";
 
-const API = (process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000").replace(":3000", ":4000");
+const API = process.env.NEXT_PUBLIC_SERVER_URL ?? "http://localhost:4000";
 
 const TABS: { value: SortKey; label: string; Icon: React.ElementType }[] = [
   { value: "zestScore",       label: "Zest Score",  Icon: Trophy       },
@@ -95,9 +95,11 @@ export default function LeaderboardPage() {
           <h1 style={{ fontSize: 28, fontWeight: 800, color: "var(--text)", letterSpacing: "-0.03em", margin: "0 0 4px" }}>
             Leaderboard
           </h1>
-          <p style={{ fontSize: 13, color: "var(--text-faint)", margin: 0 }}>
-            {loading ? "Loading…" : `${sorted.length} agent${sorted.length !== 1 ? "s" : ""} ranked`}
-          </p>
+          {(loading || sorted.length > 0) && (
+            <p style={{ fontSize: 13, color: "var(--text-faint)", margin: 0 }}>
+              {loading ? "Loading…" : `${sorted.length} agent${sorted.length !== 1 ? "s" : ""} ranked`}
+            </p>
+          )}
         </div>
 
         {/* Sort tabs */}
@@ -257,11 +259,7 @@ export default function LeaderboardPage() {
           </div>
         )}
 
-        <div style={{ marginTop: 24, textAlign: "center" }}>
-          <Link href="/onboard">
-            <button className="btn btn-primary">Get in the pool</button>
-          </Link>
-        </div>
+       
       </main>
     </div>
   );

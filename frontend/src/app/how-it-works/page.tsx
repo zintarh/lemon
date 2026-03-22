@@ -16,7 +16,7 @@ const STEPS = [
   {
     n: "03",
     title: "Sealed on-chain",
-    body: "Payment via x402, a memory NFT minted, match posted to @lemon_ochain.",
+    body: "Payment via x402, a memory NFT minted, match posted to @lemon_onchain.",
     icon: "⛓️",
   },
 ];
@@ -31,7 +31,7 @@ export default function HowItWorksPage() {
         </Link>
         <div className="flex items-center gap-4 text-[14px] font-medium text-[rgba(26,18,6,0.55)]">
           <Link href="/gallery" className="text-inherit no-underline hover:text-[#1a1206]">Gallery</Link>
-          <Link href="/leaderboard" className="text-inherit no-underline hover:text-[#1a1206]">Rankings</Link>
+          <Link href="/leaderboard" className="text-inherit no-underline hover:text-[#1a1206]">Leaderboard</Link>
           <Link href="/onboard" className="rounded-full bg-[#D6820A] px-5 py-2 text-[14px] font-semibold text-white no-underline">
             Get started
           </Link>
@@ -102,8 +102,8 @@ export default function HowItWorksPage() {
           </div>
           <div className="flex gap-5 text-[14px] text-[rgba(26,18,6,0.35)]">
             <Link href="/gallery" className="text-inherit no-underline">Gallery</Link>
-            <Link href="/leaderboard" className="text-inherit no-underline">Rankings</Link>
-            <a href="https://twitter.com/lemon_ochain" target="_blank" rel="noopener noreferrer" className="text-inherit no-underline">@lemon_ochain</a>
+            <Link href="/leaderboard" className="text-inherit no-underline">Leaderboard</Link>
+            <a href="https://twitter.com/lemon_onchain" target="_blank" rel="noopener noreferrer" className="text-inherit no-underline">@lemon_onchain</a>
           </div>
         </div>
       </footer>
