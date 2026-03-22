@@ -269,6 +269,8 @@ function VoiceOnboardingModal({
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const recognitionRef = useRef<any>(null);
   const isMounted = useRef(true);
+  // Accumulates final transcript segments across continuous recognition events
+  const accumulatedRef = useRef("");
 
   useEffect(() => {
     isMounted.current = true;
@@ -286,31 +288,47 @@ function VoiceOnboardingModal({
       return;
     }
 
+    accumulatedRef.current = "";
+    setCurrentAnswer("");
+
     const recognition = new SpeechRecognitionAPI();
     recognition.lang = "en-US";
-    recognition.interimResults = false;
+    recognition.continuous = true;      // keep recording until user clicks Done
+    recognition.interimResults = true;  // stream words as they're spoken
     recognition.maxAlternatives = 1;
     recognitionRef.current = recognition;
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     recognition.onresult = (event: any) => {
-      const transcript = event.results[0][0].transcript;
-      if (isMounted.current) {
-        setCurrentAnswer(transcript);
-        setPhase("reviewing");
+      if (!isMounted.current) return;
+      let interim = "";
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        if (event.results[i].isFinal) {
+          accumulatedRef.current += event.results[i][0].transcript + " ";
+        } else {
+          interim += event.results[i][0].transcript;
+        }
       }
+      // Show final + in-progress words in real time
+      setCurrentAnswer(accumulatedRef.current + interim);
     };
+
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     recognition.onerror = (event: any) => {
       if (!isMounted.current) return;
-      if (event.error === "no-speech") {
-        setCurrentAnswer("");
-        setPhase("reviewing");
-      } else {
-        setErrorMsg(`Microphone error: ${event.error}. Please try again.`);
-        setPhase("error");
-      }
+      // "no-speech" with continuous mode is non-fatal — just keep waiting
+      if (event.error === "no-speech") return;
+      setErrorMsg(`Microphone error: ${event.error}. Please try again.`);
+      setPhase("error");
     };
+
+    // onend fires when recognition.stop() is explicitly called (user clicks Done)
+    recognition.onend = () => {
+      if (!isMounted.current) return;
+      setCurrentAnswer(accumulatedRef.current.trim());
+      setPhase("reviewing");
+    };
+
     recognition.start();
     setPhase("listening");
   }, []);
@@ -330,6 +348,7 @@ function VoiceOnboardingModal({
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   function stopListening() {
+    // Triggers recognition.onend → transitions to "reviewing"
     recognitionRef.current?.stop();
   }
 
@@ -418,19 +437,33 @@ function VoiceOnboardingModal({
         )}
 
         {phase === "listening" && (
-          <div className="flex flex-col items-center gap-3 py-4">
-            <div className="relative w-14 h-14">
-              <div className="absolute inset-0 rounded-full bg-red-500/20 animate-ping" />
-              <div className="relative w-14 h-14 rounded-full bg-red-500/10 border-2 border-red-400 flex items-center justify-center text-2xl">
-                🎤
+          <div className="flex flex-col items-center gap-4 py-2">
+            <div className="flex items-center gap-3">
+              <div className="relative w-10 h-10 shrink-0">
+                <div className="absolute inset-0 rounded-full bg-red-500/20 animate-ping" />
+                <div className="relative w-10 h-10 rounded-full bg-red-500/10 border-2 border-red-400 flex items-center justify-center text-xl">
+                  🎤
+                </div>
               </div>
+              <p className="text-[13px] text-red-500 font-semibold">Listening — take your time</p>
             </div>
-            <p className="text-sm text-red-500 font-semibold">Listening… speak now</p>
+
+            {/* Live transcript preview */}
+            <div className="w-full min-h-[64px] rounded-2xl bg-black/[0.03] border border-black/[0.07] px-4 py-3">
+              {currentAnswer ? (
+                <p className="text-[13.5px] text-[#1a1206]/75 m-0 leading-[1.6] italic">{currentAnswer}</p>
+              ) : (
+                <p className="text-[13px] text-[#1a1206]/25 m-0 italic">Your words will appear here…</p>
+              )}
+            </div>
+
+            {/* Done button — the only way to stop; no auto-cutoff */}
             <button
               onClick={stopListening}
-              className="text-xs text-[#1a1206]/40 underline underline-offset-2 cursor-pointer bg-transparent border-none"
+              className="w-full rounded-xl border-none py-3 text-[14px] font-bold text-white cursor-pointer transition-opacity hover:opacity-90"
+              style={{ background: "linear-gradient(135deg, #D6820A, #b86e00)" }}
             >
-              Done speaking
+              Done speaking →
             </button>
           </div>
         )}
@@ -540,7 +573,7 @@ export default function OnboardPage() {
     if (isApproveSuccess) router.push("/dashboard");
   }, [isApproveSuccess, router]);
 
-  const [onboardMode, setOnboardMode] = useState<"choose" | "voice" | "template">("choose");
+  const [onboardMode, setOnboardMode] = useState<"choose" | "template" | "voice-preview">("choose");
   const [showVoiceModal, setShowVoiceModal] = useState(false);
 
   const [step, setStep] = useState(0);
@@ -583,10 +616,8 @@ export default function OnboardPage() {
     });
     setSelectedId(best.id);
     setShowVoiceModal(false);
-    setOnboardMode("template"); // reuse template flow UI
-    setStep(1);
-    setSubStep(0);
-    toast.success("Profile built from your voice!", { description: "Review and edit your details below." });
+    // Go to preview so user can upload a photo and confirm before continuing
+    setOnboardMode("voice-preview");
   }
 
   function validateStep0() {
@@ -835,6 +866,137 @@ export default function OnboardPage() {
     </div>
   );
 
+
+  // ── Voice preview ──────────────────────────────────────────────────────────────
+
+  if (onboardMode === "voice-preview") return (
+    <div className={pageClass}>
+      {showVoiceModal && (
+        <VoiceOnboardingModal onComplete={handleVoiceComplete} onClose={() => setShowVoiceModal(false)} />
+      )}
+      <MiniHeader right={<ConnectButton />} />
+      <div className="flex-1 overflow-y-auto px-5 py-6 sm:px-8 sm:py-8">
+        <div className="mx-auto max-w-[480px] flex flex-col gap-5">
+
+          {/* Header */}
+          <div>
+            <p className="text-[11px] font-bold tracking-[0.1em] uppercase text-[#1a1206]/30 m-0 mb-1">
+              Voice Setup · Done
+            </p>
+            <h1 className="font-black text-[clamp(22px,3.5vh,32px)] text-[#1a1206] tracking-[-0.04em] leading-[1.1] m-0 mb-1">
+              Here&apos;s your agent
+            </h1>
+            <p className="text-[13px] text-[#1a1206]/45 m-0 leading-[1.5]">
+              Lemon built this from your answers. Add a photo, then continue.
+            </p>
+          </div>
+
+          {/* Avatar upload — required in this flow */}
+          <div className="rounded-2xl bg-white border border-black/[0.07] shadow-[0_1px_8px_rgba(0,0,0,0.04)] px-4 py-4">
+            <p className="text-[10px] font-bold tracking-[0.1em] uppercase text-[#1a1206]/30 mb-3">
+              Profile photo <span className="text-red-500">*</span>
+            </p>
+            <div className="flex items-center gap-4">
+              {/* Preview circle */}
+              <div
+                onClick={() => avatarInputRef.current?.click()}
+                className="relative shrink-0 w-16 h-16 rounded-full cursor-pointer overflow-hidden border-2 border-dashed border-[#D6820A]/50 hover:border-[#D6820A] transition-colors flex items-center justify-center bg-amber-50"
+              >
+                {avatarPreview ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img src={avatarPreview} alt="Avatar" className="w-full h-full object-cover" />
+                ) : (
+                  <span className="text-2xl">📷</span>
+                )}
+                {avatarLoading && (
+                  <div className="absolute inset-0 flex items-center justify-center bg-white/70">
+                    <LemonPulseLoader className="h-5 w-5" />
+                  </div>
+                )}
+              </div>
+              <div>
+                <button
+                  type="button"
+                  onClick={() => avatarInputRef.current?.click()}
+                  className="rounded-xl border border-[rgba(0,0,0,0.1)] bg-white px-4 py-2 text-[13px] font-semibold text-[#1a1206]/70 cursor-pointer hover:bg-black/[0.03] transition-colors"
+                >
+                  {avatarPreview ? "Change photo" : "Upload photo"}
+                </button>
+                <p className="text-[11px] text-[#1a1206]/35 mt-1 m-0">JPG or PNG · helps with matching</p>
+              </div>
+            </div>
+            <input
+              ref={avatarInputRef}
+              type="file"
+              accept="image/*"
+              className="hidden"
+              onChange={handleAvatarChange}
+            />
+          </div>
+
+          {/* Profile summary cards */}
+          <div className="rounded-2xl bg-white border border-black/[0.07] shadow-[0_1px_8px_rgba(0,0,0,0.04)] divide-y divide-black/[0.05]">
+            <div className="px-4 py-3">
+              <p className="text-[10px] font-bold tracking-[0.1em] uppercase text-[#1a1206]/30 mb-0.5">Name</p>
+              <p className="text-[16px] font-bold text-[#1a1206]">{name || "—"}</p>
+            </div>
+            <div className="px-4 py-3">
+              <p className="text-[10px] font-bold tracking-[0.1em] uppercase text-[#1a1206]/30 mb-1.5">Personality</p>
+              <p className="text-[13px] text-[#1a1206]/70 leading-[1.6] line-clamp-4">{personalityFree || "—"}</p>
+            </div>
+            <div className="px-4 py-3">
+              <p className="text-[10px] font-bold tracking-[0.1em] uppercase text-[#1a1206]/30 mb-2">Looking for</p>
+              <div className="flex flex-wrap gap-1.5">
+                {lookingFor.length > 0 ? lookingFor.map(id => {
+                  const chip = LOOKING_FOR_CHIPS.find(c => c.id === id);
+                  return chip ? (
+                    <span key={id} className="rounded-full border border-[#D6820A]/40 bg-[#D6820A]/10 px-2.5 py-0.5 text-[12px] font-semibold text-[#92400e]">
+                      {chip.label}
+                    </span>
+                  ) : null;
+                }) : <span className="text-[12px] text-[#1a1206]/30">None selected</span>}
+              </div>
+            </div>
+            <div className="px-4 py-3">
+              <p className="text-[10px] font-bold tracking-[0.1em] uppercase text-[#1a1206]/30 mb-2">Deal breakers</p>
+              <div className="flex flex-wrap gap-1.5">
+                {dealBreakers.length > 0 ? dealBreakers.map(id => {
+                  const chip = DEAL_BREAKER_CHIPS.find(c => c.id === id);
+                  return chip ? (
+                    <span key={id} className="rounded-full border border-red-300/60 bg-red-50 px-2.5 py-0.5 text-[12px] font-semibold text-red-600">
+                      {chip.label}
+                    </span>
+                  ) : null;
+                }) : <span className="text-[12px] text-[#1a1206]/30">None selected</span>}
+              </div>
+            </div>
+          </div>
+
+          {/* Actions */}
+          <div className="flex flex-col gap-2 pb-4">
+            {!avatarPreview && (
+              <p className="text-[11px] text-amber-600 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2 text-center">
+                Upload a photo to help your agent stand out in the pool
+              </p>
+            )}
+            <button
+              className="btn btn-primary w-full text-[clamp(13px,1.7vh,15px)]"
+              onClick={() => { setOnboardMode("template"); setStep(1); setSubStep(1); }}
+            >
+              Looks good — continue →
+            </button>
+            <button
+              type="button"
+              onClick={() => { setOnboardMode("template"); setStep(1); setSubStep(0); }}
+              className="text-center text-[12px] text-[#1a1206]/40 underline underline-offset-2 cursor-pointer bg-transparent border-none py-1"
+            >
+              Edit all details
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
 
   // ── Mode choice ──────────────────────────────────────────────────────────────
 
