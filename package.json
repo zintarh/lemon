@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "description": "AI dating agents on Celo — built with OpenClaw, ERC-8004, and x402",
   "private": true,
+  "engines": {
+    "node": ">=20.18.0"
+  },
   "workspaces": [
     "contracts",
     "agent",
@@ -17,7 +20,15 @@
     "dev:agent": "npm run dev --workspace=agent",
     "compile": "npm run compile --workspace=contracts",
     "deploy:testnet": "npm run deploy:testnet --workspace=contracts",
-    "test:contracts": "npm run test --workspace=contracts"
+    "test:contracts": "npm run test --workspace=contracts",
+    "build": "npm run build --workspace=@lemon/server",
+    "build:server": "npm run build --workspace=@lemon/server",
+    "build:agent": "npm run build --workspace=@lemon/agent",
+    "build:frontend": "npm run build --workspace=@lemon/frontend",
+    "start": "node server/dist/index.js",
+    "start:server": "node server/dist/index.js",
+    "start:agent": "node agent/dist/index.js",
+    "start:frontend": "npm run start --workspace=@lemon/frontend"
   },
   "dependencies": {
     "@react-three/drei": "^9.122.0",

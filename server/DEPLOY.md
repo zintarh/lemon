@@ -37,8 +37,17 @@ From the **repository root**:
 | Step | Command |
 |------|---------|
 | **Install** | `npm install` |
-| **Build (optional)** | `npm run build --workspace=server` — TypeScript check; runtime uses `tsx` so this is optional |
-| **Start** | `npm run start --workspace=server` |
+| **Build** | `npm run build` or `npm run build:server` — compiles `server/` to `server/dist/` (required for `node server/dist/index.js`) |
+| **Start (production)** | `npm run start` or `node server/dist/index.js` |
+
+**Railway / Nixpacks:** The monorepo root `package.json` defines `build` → server compile and `start` → `node server/dist/index.js`. Root `package.json` also sets `engines.node` to **≥20.18** so Nixpacks uses Node 20 (avoids `EBADENGINE` from `@supabase/*`, Solana, etc.).
+
+If Railway’s **auto build** runs plain `npm run build` at the repo root, it now succeeds for the **API**. For a **separate Railway service** that only deploys **Next.js**, set **custom** commands:
+
+| | |
+|--|--|
+| **Build** | `npm install && npm run build:frontend` |
+| **Start** | `npm run start:frontend` |
 
 **Note:** `server` loads env from the monorepo `.env` **if present** (`loadEnv.ts`), but in production you should set **all variables in the host’s dashboard** — a file is not required.
 

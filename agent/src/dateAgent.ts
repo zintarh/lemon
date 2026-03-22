@@ -148,7 +148,7 @@ export async function generateDateImage(
   }
 
   const model = genAI.getGenerativeModel({
-    model: "gemini-2.0-flash-exp",
+    model: "gemini-2.0-flash-preview-image-generation",
     // @ts-expect-error — responseModalities not yet typed in SDK
     generationConfig: { responseModalities: ["IMAGE", "TEXT"] },
   });

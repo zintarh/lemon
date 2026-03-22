@@ -35,7 +35,7 @@ The **browser never calls the agent** directly; only the server does.
 ## 2. Server (`server/`) → **always-on Node host** (not Vercel)
 
 - **What it is:** Express API + chain indexer + matcher + x402 + Telegram hooks, etc. **Long-running**.
-- **Good options:** [Railway](https://railway.app), [Render](https://render.com), [Fly.io](https://fly.io), a small VPS, AWS ECS/Fargate, Google Cloud Run (with min instances ≥ 1 if you need 24/7 indexer).
+- **Good options:** [Railway](https://railway.app) — see **[`RAILWAY.md`](RAILWAY.md)** for monorepo build/start commands and Node 20, plus [Render](https://render.com), [Fly.io](https://fly.io), a small VPS, AWS ECS/Fargate, Google Cloud Run (with min instances ≥ 1 if you need 24/7 indexer).
 
 **Connects to:**
 

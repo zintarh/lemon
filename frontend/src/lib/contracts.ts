@@ -39,9 +39,9 @@ export const erc20Abi = parseAbi([
 
 // cUSD token addresses
 export const CUSD_ADDRESS = (
-  process.env.NEXT_PUBLIC_NETWORK === "testnet"
-    ? "0x874069Fa1Eb16D44d622F2e0Ca25eeA172369bC1"
-    : "0x765DE816845861e75A25fCA122bb6898B8B1282a"
+  process.env.NEXT_PUBLIC_NETWORK === "mainnet"
+    ? "0x765DE816845861e75A25fCA122bb6898B8B1282a"
+    : "0xdE9e4C3ce781b4bA68120d6261cbad65ce0aB00b" // Celo Sepolia testnet
 ) as Address;
 
 export const lemonNFTAbi = parseAbi([

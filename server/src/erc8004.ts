@@ -20,13 +20,21 @@ import {
   type Hex,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { celo, celoAlfajores } from "viem/chains";
+import { celo, type Chain } from "viem/chains";
+
+const celoSepolia: Chain = {
+  id: 11142220,
+  name: "Celo L2 Testnet",
+  nativeCurrency: { name: "CELO", symbol: "CELO", decimals: 18 },
+  rpcUrls: { default: { http: ["https://forno.celo-sepolia.celo-testnet.org"] } },
+  testnet: true,
+};
 
 const IS_MAINNET = process.env.NETWORK === "mainnet";
-const chain = IS_MAINNET ? celo : celoAlfajores;
+const chain = IS_MAINNET ? celo : celoSepolia;
 const rpcUrl = IS_MAINNET
   ? (process.env.CELO_RPC_URL ?? "https://forno.celo.org")
-  : (process.env.CELO_SEPOLIA_RPC_URL ?? "https://alfajores-forno.celo-testnet.org");
+  : (process.env.CELO_SEPOLIA_RPC_URL ?? "https://forno.celo-sepolia.celo-testnet.org");
 
 const REGISTRY_ADDRESS = IS_MAINNET
   ? "0x8004A169FB4a3325136EB29fA0ceB6D2e539a432"

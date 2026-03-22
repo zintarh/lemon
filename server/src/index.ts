@@ -69,9 +69,9 @@ const AGENT_URL = process.env.AGENT_URL ?? `http://localhost:${process.env.AGENT
 const PORT = Number(process.env.SERVER_PORT || process.env.PORT || 4000);
 
 const CUSD_ADDRESS = (
-  process.env.NETWORK === "testnet"
-    ? "0x874069Fa1Eb16D44d622F2e0Ca25eeA172369bC1"
-    : "0x765DE816845861e75A25fCA122bb6898B8B1282a"
+  process.env.NETWORK === "mainnet"
+    ? "0x765DE816845861e75A25fCA122bb6898B8B1282a"
+    : "0xdE9e4C3ce781b4bA68120d6261cbad65ce0aB00b" // Celo Sepolia testnet
 ) as Address;
 
 const DATE_COST_CENTS = Number(process.env.DATE_COST_CENTS ?? 100);
@@ -93,7 +93,10 @@ function agentHeaders(): Record<string, string> {
 }
 
 function agentCall(path: string, body: unknown) {
-  return axios.post(`${AGENT_URL}${path}`, body, { headers: agentHeaders() }).then((r) => r.data);
+  return axios.post(`${AGENT_URL}${path}`, body, { headers: agentHeaders() }).then((r) => r.data).catch((e) => {
+    const detail = e?.response?.data?.error ?? e?.response?.data ?? e?.message;
+    throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+  });
 }
 
 /** Prevents overlapping matcher cycles (interval + manual trigger). */

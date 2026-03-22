@@ -275,6 +275,7 @@ export async function getAllAgents(): Promise<Address[]> {
 
 const erc20TransferAbi = parseAbi([
   "function transfer(address to, uint256 amount) returns (bool)",
+  "function balanceOf(address) view returns (uint256)",
 ]);
 
 /**
@@ -293,6 +294,16 @@ export async function collectPayment(params: {
   const { payerMode, agentAPrivateKey, agentBPrivateKey, treasuryAddress, cUSDAddress, amountUSD } = params;
 
   async function transfer(fromKey: `0x${string}`, amount: string): Promise<void> {
+    const addr = (await import("viem/accounts")).privateKeyToAddress(fromKey);
+    const { formatUnits } = await import("viem");
+    const [cUSDBalance, celoBalance] = await Promise.all([
+      publicClient.readContract({ address: cUSDAddress, abi: erc20TransferAbi, functionName: "balanceOf", args: [addr] }),
+      publicClient.getBalance({ address: addr }),
+    ]);
+    console.log(`[payment] agent wallet: ${addr}`);
+    console.log(`[payment]   cUSD balance: ${formatUnits(cUSDBalance, 18)} (needs: ${amount})`);
+    console.log(`[payment]   CELO balance (gas): ${formatUnits(celoBalance, 18)}`);
+
     const client = createAgentWalletClient(fromKey);
     const hash = await client.writeContract({
       address: cUSDAddress,
@@ -301,8 +312,7 @@ export async function collectPayment(params: {
       args: [treasuryAddress, parseUnits(amount, 18)],
     });
     await publicClient.waitForTransactionReceipt({ hash });
-    const addr = (await import("viem/accounts")).privateKeyToAddress(fromKey);
-    console.log(`[payment] ✓ ${amount} cUSD transferred from ${addr.slice(0, 8)}… → treasury`);
+    console.log(`[payment] ✓ ${amount} cUSD transferred from ${addr} → treasury`);
   }
 
   if (payerMode === "SPLIT") {

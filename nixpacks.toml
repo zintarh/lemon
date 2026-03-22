@@ -1,3 +1,10 @@
+# Lemon API (monorepo root). Railway/Nixpacks: use Node 20+ (engines in root package.json).
+# For the Next.js app only, set Build Command to: npm run build:frontend
+# and Start Command to: npm run start:frontend
+
+[variables]
+NIXPACKS_NODE_VERSION = "20"
+
 [phases.install]
 onlyIncludeFiles = [
   "package.json",
@@ -10,7 +17,7 @@ onlyIncludeFiles = [
 cmds = ["npm install"]
 
 [phases.build]
-cmds = ["npm run build --workspace=@lemon/server"]
+cmds = ["npm run build"]
 
 [start]
 cmd = "node server/dist/index.js"
