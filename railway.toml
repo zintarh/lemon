@@ -1,0 +1,14 @@
+# Default Lemon **API** service (monorepo root → server output in server/dist/).
+# If you deploy the **agent** with Root Directory = `agent`, Railway uses agent/railway.toml instead.
+# Override per service in the Railway dashboard if needed.
+
+[build]
+builder = "NIXPACKS"
+buildCommand = "npm install && npm run build"
+
+[deploy]
+startCommand = "node server/dist/index.js"
+healthcheckPath = "/health"
+healthcheckTimeout = 30
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 3

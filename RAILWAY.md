@@ -34,6 +34,17 @@ Do **not** use the root default `npm run build` (that builds the **server**). Se
 
 Prefer **Vercel** for the Next app; see `frontend/VERCEL.md`.
 
+## Error: `Cannot find module '/app/dist/index.js'`
+
+Railway is running **`node dist/index.js`** from the **repo root** (`/app`). In this monorepo, `tsc` writes to **`server/dist/index.js`**, not `/app/dist/index.js`.
+
+**Fix:** Set **Start Command** to one of:
+
+- `node server/dist/index.js`
+- `npm run start` (root `package.json` maps this to the same path)
+
+The repo root **`railway.toml`** sets this for new links; if your service still uses `node dist/index.js`, change it in **Railway → Service → Settings → Deploy**.
+
 ## What went wrong before
 
 - `npm run build` at the **monorepo root** had no script → **Missing script: "build"**. Root `package.json` now defines `build` for the server.
