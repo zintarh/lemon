@@ -2,7 +2,7 @@
 builder = "nixpacks"
 
 [deploy]
-startCommand = "node --no-deprecation --import tsx/esm src/index.ts"
+startCommand = "node --no-deprecation --import tsx/esm agent/src/index.ts"
 healthcheckPath = "/health"
 healthcheckTimeout = 30
 restartPolicyType = "on_failure"

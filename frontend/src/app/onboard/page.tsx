@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { toast } from "sonner";
 import { usePrivy } from "@privy-io/react-auth";
 import { useAccount, usePublicClient } from "wagmi";
@@ -200,6 +200,306 @@ function TemplateCard({ t, selected, onClick }: { t: Template; selected: boolean
   );
 }
 
+// ── ElevenLabs TTS helper ──────────────────────────────────────────────────────
+
+async function speakText(text: string): Promise<void> {
+  const apiKey = process.env.NEXT_PUBLIC_ELEVENLABS_API_KEY;
+  if (apiKey) {
+    try {
+      const voiceId = "21m00Tcm4TlvDq8ikWAM"; // Rachel
+      const res = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "xi-api-key": apiKey },
+        body: JSON.stringify({
+          text,
+          model_id: "eleven_monolingual_v1",
+          voice_settings: { stability: 0.5, similarity_boost: 0.75 },
+        }),
+      });
+      if (res.ok) {
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        return new Promise(resolve => {
+          const audio = new Audio(url);
+          audio.onended = () => { URL.revokeObjectURL(url); resolve(); };
+          audio.onerror = () => { URL.revokeObjectURL(url); resolve(); };
+          audio.play().catch(() => resolve());
+        });
+      }
+    } catch { /* fall through to browser TTS */ }
+  }
+  // Fallback: browser speech synthesis
+  return new Promise(resolve => {
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.rate = 0.95;
+    utterance.onend = () => resolve();
+    utterance.onerror = () => resolve();
+    window.speechSynthesis.speak(utterance);
+  });
+}
+
+// ── VoiceOnboardingModal ───────────────────────────────────────────────────────
+
+const VOICE_QUESTIONS = [
+  "Hi! I'm Lemon, your AI matchmaker. What's your name?",
+  "Nice to meet you! Tell me a bit about yourself — your personality and vibe.",
+  "What are you looking for in a connection? For example: deep conversations, adventures, stability?",
+  "Last one — what are your deal breakers? What absolutely won't you tolerate in a match?",
+];
+
+interface VoiceProfile {
+  name: string;
+  personality: string;
+  lookingFor: string[];
+  dealBreakers: string[];
+}
+
+function VoiceOnboardingModal({
+  onComplete,
+  onClose,
+}: {
+  onComplete: (profile: VoiceProfile) => void;
+  onClose: () => void;
+}) {
+  const [phase, setPhase] = useState<"speaking" | "listening" | "reviewing" | "processing" | "error">("speaking");
+  const [qIndex, setQIndex] = useState(0);
+  const [answers, setAnswers] = useState<string[]>([]);
+  const [currentAnswer, setCurrentAnswer] = useState("");
+  const [errorMsg, setErrorMsg] = useState("");
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const recognitionRef = useRef<any>(null);
+  const isMounted = useRef(true);
+
+  useEffect(() => {
+    isMounted.current = true;
+    return () => { isMounted.current = false; };
+  }, []);
+
+  const startListening = useCallback(() => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const w = window as any;
+    const SpeechRecognitionAPI = w.SpeechRecognition || w.webkitSpeechRecognition;
+
+    if (!SpeechRecognitionAPI) {
+      setErrorMsg("Your browser doesn't support voice input. Try Chrome or Edge.");
+      setPhase("error");
+      return;
+    }
+
+    const recognition = new SpeechRecognitionAPI();
+    recognition.lang = "en-US";
+    recognition.interimResults = false;
+    recognition.maxAlternatives = 1;
+    recognitionRef.current = recognition;
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    recognition.onresult = (event: any) => {
+      const transcript = event.results[0][0].transcript;
+      if (isMounted.current) {
+        setCurrentAnswer(transcript);
+        setPhase("reviewing");
+      }
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    recognition.onerror = (event: any) => {
+      if (!isMounted.current) return;
+      if (event.error === "no-speech") {
+        setCurrentAnswer("");
+        setPhase("reviewing");
+      } else {
+        setErrorMsg(`Microphone error: ${event.error}. Please try again.`);
+        setPhase("error");
+      }
+    };
+    recognition.start();
+    setPhase("listening");
+  }, []);
+
+  const askQuestion = useCallback(async (index: number) => {
+    if (!isMounted.current) return;
+    setPhase("speaking");
+    setCurrentAnswer("");
+    await speakText(VOICE_QUESTIONS[index]);
+    if (!isMounted.current) return;
+    startListening();
+  }, [startListening]);
+
+  // Start first question on mount
+  useEffect(() => {
+    askQuestion(0);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  function stopListening() {
+    recognitionRef.current?.stop();
+  }
+
+  function handleNext() {
+    const newAnswers = [...answers, currentAnswer];
+    setAnswers(newAnswers);
+
+    if (qIndex < VOICE_QUESTIONS.length - 1) {
+      setQIndex(qIndex + 1);
+      askQuestion(qIndex + 1);
+    } else {
+      // All answers collected — send to API
+      processProfile(newAnswers);
+    }
+  }
+
+  function handleReRecord() {
+    askQuestion(qIndex);
+  }
+
+  async function processProfile(allAnswers: string[]) {
+    setPhase("processing");
+    try {
+      const res = await fetch("/api/voice-profile", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          nameAnswer: allAnswers[0] ?? "",
+          aboutAnswer: allAnswers[1] ?? "",
+          lookingForAnswer: allAnswers[2] ?? "",
+          dealBreakersAnswer: allAnswers[3] ?? "",
+        }),
+      });
+      if (!res.ok) throw new Error("Profile extraction failed");
+      const profile: VoiceProfile = await res.json();
+      onComplete(profile);
+    } catch (e) {
+      if (isMounted.current) {
+        setErrorMsg((e as Error).message ?? "Something went wrong. Try again.");
+        setPhase("error");
+      }
+    }
+  }
+
+  const progressPct = ((qIndex + (phase === "processing" ? 1 : 0)) / VOICE_QUESTIONS.length) * 100;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-[6px] p-4">
+      <div className="relative bg-[#FAFAF8] rounded-[28px] shadow-[0_24px_80px_rgba(0,0,0,0.25)] max-w-[460px] w-full px-8 py-8 flex flex-col gap-5">
+
+        {/* Close */}
+        <button
+          onClick={() => { stopListening(); onClose(); }}
+          className="absolute top-5 right-5 w-8 h-8 rounded-full flex items-center justify-center bg-black/[0.06] text-black/50 hover:bg-black/10 transition-colors border-none cursor-pointer text-sm font-bold"
+        >
+          ✕
+        </button>
+
+        {/* Header */}
+        <div>
+          <p className="text-[11px] font-bold tracking-[0.1em] uppercase text-[#1a1206]/30 m-0 mb-1">
+            Voice Setup · {qIndex + 1} of {VOICE_QUESTIONS.length}
+          </p>
+          {/* Progress bar */}
+          <div className="h-1 rounded-full bg-black/[0.06] overflow-hidden">
+            <div
+              className="h-full rounded-full bg-[#D6820A] transition-all duration-500"
+              style={{ width: `${progressPct}%` }}
+            />
+          </div>
+        </div>
+
+        {/* Question */}
+        <p className="text-[18px] font-bold text-[#1a1206] leading-[1.35] tracking-[-0.02em] m-0">
+          {VOICE_QUESTIONS[qIndex]}
+        </p>
+
+        {/* Status area */}
+        {phase === "speaking" && (
+          <div className="flex flex-col items-center gap-3 py-4">
+            <div className="w-14 h-14 rounded-full bg-[#D6820A]/10 flex items-center justify-center text-2xl animate-pulse">
+              🎙️
+            </div>
+            <p className="text-sm text-[#1a1206]/40">Lemon is speaking…</p>
+          </div>
+        )}
+
+        {phase === "listening" && (
+          <div className="flex flex-col items-center gap-3 py-4">
+            <div className="relative w-14 h-14">
+              <div className="absolute inset-0 rounded-full bg-red-500/20 animate-ping" />
+              <div className="relative w-14 h-14 rounded-full bg-red-500/10 border-2 border-red-400 flex items-center justify-center text-2xl">
+                🎤
+              </div>
+            </div>
+            <p className="text-sm text-red-500 font-semibold">Listening… speak now</p>
+            <button
+              onClick={stopListening}
+              className="text-xs text-[#1a1206]/40 underline underline-offset-2 cursor-pointer bg-transparent border-none"
+            >
+              Done speaking
+            </button>
+          </div>
+        )}
+
+        {phase === "reviewing" && (
+          <div className="flex flex-col gap-3">
+            <div className="rounded-2xl bg-black/[0.03] border border-black/[0.07] px-4 py-3">
+              {currentAnswer ? (
+                <p className="text-[14px] text-[#1a1206]/80 m-0 leading-[1.5] italic">
+                  &ldquo;{currentAnswer}&rdquo;
+                </p>
+              ) : (
+                <p className="text-[13px] text-[#1a1206]/35 m-0 italic">No speech detected — try again.</p>
+              )}
+            </div>
+            <div className="flex gap-2">
+              <button
+                onClick={handleReRecord}
+                className="flex-1 rounded-xl border border-black/10 bg-white py-2.5 text-[13px] font-semibold text-[#1a1206]/60 cursor-pointer hover:bg-black/[0.03] transition-colors"
+              >
+                Re-record
+              </button>
+              <button
+                onClick={handleNext}
+                className="flex-1 rounded-xl border-none py-2.5 text-[13px] font-bold text-white cursor-pointer transition-colors"
+                style={{ background: "linear-gradient(135deg, #D6820A, #b86e00)" }}
+              >
+                {qIndex < VOICE_QUESTIONS.length - 1 ? "Next →" : "Done ✓"}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {phase === "processing" && (
+          <div className="flex flex-col items-center gap-3 py-4">
+            <div className="w-14 h-14 rounded-full bg-[#D6820A]/10 flex items-center justify-center text-2xl animate-spin">
+              ⚙️
+            </div>
+            <p className="text-sm text-[#1a1206]/40">Building your profile…</p>
+          </div>
+        )}
+
+        {phase === "error" && (
+          <div className="flex flex-col gap-3">
+            <div className="rounded-2xl bg-red-50 border border-red-200 px-4 py-3">
+              <p className="text-[13px] text-red-700 m-0">{errorMsg}</p>
+            </div>
+            <button
+              onClick={() => askQuestion(qIndex)}
+              className="rounded-xl border-none py-2.5 text-[13px] font-bold text-white cursor-pointer"
+              style={{ background: "linear-gradient(135deg, #D6820A, #b86e00)" }}
+            >
+              Try again
+            </button>
+          </div>
+        )}
+
+        {/* Skip */}
+        <button
+          onClick={() => { stopListening(); onClose(); }}
+          className="text-[11px] text-[#1a1206]/30 underline underline-offset-2 cursor-pointer bg-transparent border-none text-center"
+        >
+          Switch to template setup instead
+        </button>
+      </div>
+    </div>
+  );
+}
+
 // ── Page ───────────────────────────────────────────────────────────────────────
 
 export default function OnboardPage() {
@@ -240,6 +540,9 @@ export default function OnboardPage() {
     if (isApproveSuccess) router.push("/dashboard");
   }, [isApproveSuccess, router]);
 
+  const [onboardMode, setOnboardMode] = useState<"choose" | "voice" | "template">("choose");
+  const [showVoiceModal, setShowVoiceModal] = useState(false);
+
   const [step, setStep] = useState(0);
   const [subStep, setSubStep] = useState(0);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -265,6 +568,25 @@ export default function OnboardPage() {
     setPersonalityFree(t.personality);
     setLookingFor(t.lookingFor);
     setDealBreakers(t.dealBreakers);
+  }
+
+  function handleVoiceComplete(profile: VoiceProfile) {
+    setName(profile.name);
+    setPersonalityFree(profile.personality);
+    setLookingFor(profile.lookingFor);
+    setDealBreakers(profile.dealBreakers);
+    // Pick the closest template by lookingFor overlap (for the sidebar thumbnail)
+    const best = TEMPLATES.reduce((a, b) => {
+      const scoreA = a.lookingFor.filter(id => profile.lookingFor.includes(id)).length;
+      const scoreB = b.lookingFor.filter(id => profile.lookingFor.includes(id)).length;
+      return scoreB > scoreA ? b : a;
+    });
+    setSelectedId(best.id);
+    setShowVoiceModal(false);
+    setOnboardMode("template"); // reuse template flow UI
+    setStep(1);
+    setSubStep(0);
+    toast.success("Profile built from your voice!", { description: "Review and edit your details below." });
   }
 
   function validateStep0() {
@@ -513,6 +835,72 @@ export default function OnboardPage() {
     </div>
   );
 
+
+  // ── Mode choice ──────────────────────────────────────────────────────────────
+
+  if (onboardMode === "choose") return (
+    <div className={pageClass}>
+      {showVoiceModal && (
+        <VoiceOnboardingModal
+          onComplete={handleVoiceComplete}
+          onClose={() => setShowVoiceModal(false)}
+        />
+      )}
+      <MiniHeader right={<ConnectButton />} />
+      <div className="flex-1 flex flex-col items-center justify-center px-6 gap-[clamp(20px,4vh,40px)]">
+        <div className="text-center max-w-[420px]">
+          <h1 className="font-black text-[clamp(26px,4.5vh,52px)] text-[#1a1206] tracking-[-0.045em] leading-[1.05] mb-[clamp(8px,1.5vh,14px)]">
+            How do you want to set up your agent?
+          </h1>
+          <p className="text-[clamp(13px,1.7vh,15px)] text-[#1a1206]/42 leading-[1.55] m-0">
+            Voice lets you speak naturally — Lemon will build your profile from what you say.
+          </p>
+        </div>
+
+        <div className="flex flex-col gap-4 w-full max-w-[400px]">
+          {/* Voice option */}
+          <button
+            type="button"
+            onClick={() => { setShowVoiceModal(true); }}
+            className="group w-full rounded-[20px] border border-[#D6820A]/30 bg-[#D6820A]/[0.04] hover:bg-[#D6820A]/[0.09] transition-all duration-200 px-6 py-5 text-left cursor-pointer"
+          >
+            <div className="flex items-center gap-4">
+              <div className="w-12 h-12 rounded-2xl bg-[#D6820A]/15 flex items-center justify-center text-2xl shrink-0">
+                🎙️
+              </div>
+              <div>
+                <p className="font-bold text-[clamp(14px,1.8vh,16px)] text-[#1a1206] m-0 mb-0.5">Set up with voice</p>
+                <p className="text-[clamp(11px,1.4vh,13px)] text-[#1a1206]/45 m-0 leading-[1.4]">
+                  Speak to Lemon — takes about 60 seconds
+                </p>
+              </div>
+              <div className="ml-auto text-[#D6820A] font-bold text-lg group-hover:translate-x-1 transition-transform">→</div>
+            </div>
+          </button>
+
+          {/* Template option */}
+          <button
+            type="button"
+            onClick={() => setOnboardMode("template")}
+            className="group w-full rounded-[20px] border border-black/[0.08] bg-white hover:bg-black/[0.02] transition-all duration-200 px-6 py-5 text-left cursor-pointer"
+          >
+            <div className="flex items-center gap-4">
+              <div className="w-12 h-12 rounded-2xl bg-black/[0.05] flex items-center justify-center text-2xl shrink-0">
+                📋
+              </div>
+              <div>
+                <p className="font-bold text-[clamp(14px,1.8vh,16px)] text-[#1a1206] m-0 mb-0.5">Pick a template</p>
+                <p className="text-[clamp(11px,1.4vh,13px)] text-[#1a1206]/45 m-0 leading-[1.4]">
+                  Choose a personality and customize it
+                </p>
+              </div>
+              <div className="ml-auto text-[#1a1206]/25 font-bold text-lg group-hover:translate-x-1 transition-transform">→</div>
+            </div>
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 
   if (step === 0) return (
     <div className={pageClass}>
