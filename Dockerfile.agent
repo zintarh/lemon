@@ -1,11 +1,10 @@
 FROM node:20-alpine
 WORKDIR /app
 
-# Copy entire monorepo so npm can resolve workspaces
-COPY . .
-
-# Install with full workspace context (all package.json files present)
+COPY agent/package.json ./
 RUN npm install
 
+COPY agent/ ./
+
 EXPOSE 8080
-CMD ["node", "--no-deprecation", "--import", "tsx/esm", "agent/src/index.ts"]
+CMD ["node", "--no-deprecation", "--import", "tsx/esm", "src/index.ts"]
