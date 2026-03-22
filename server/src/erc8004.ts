@@ -1,92 +1,124 @@
 /**
  * erc8004.ts
  *
- * Registers a Lemon agent in the ERC-8004 Identity Registry (ChaosChain)
- * and links the returned agentId back on-chain via LemonAgent.linkERC8004Id.
+ * Registers a Lemon agent in the ERC-8004 Identity Registry on ChaosChain.
+ * Uses viem directly — no @chaoschain/sdk needed (ESM-incompatible).
  *
- * Called once, right after a user's on-chain AgentRegistered event fires.
+ * IdentityRegistry (Celo mainnet): 0x8004A169FB4a3325136EB29fA0ceB6D2e539a432
+ * IdentityRegistry (Celo testnet): 0x8004A818BFB912233c491871b3d84c89A494BD9e
  *
- * Docs: https://erc8004.chaoschain.xyz/docs
+ * Contract: register(string tokenURI) → uint256 agentId
+ * Event:    Registered(uint256 indexed agentId, string tokenURI, address indexed owner)
  */
 
-import axios from "axios";
-import { parseAbi, type Address } from "viem";
-import { publicClient, walletClient } from "./onchain.js";
+import {
+  createWalletClient,
+  createPublicClient,
+  http,
+  parseAbiItem,
+  decodeEventLog,
+  type Hex,
+} from "viem";
+import { privateKeyToAccount } from "viem/accounts";
+import { celo, celoAlfajores } from "viem/chains";
 
-const CHAOSCHAIN_API = "https://api.chaoschain.xyz/v1";
-const API_KEY = process.env.CHAOSCHAIN_API_KEY ?? "";
+const IS_MAINNET = process.env.NETWORK === "mainnet";
+const chain = IS_MAINNET ? celo : celoAlfajores;
+const rpcUrl = IS_MAINNET
+  ? (process.env.CELO_RPC_URL ?? "https://forno.celo.org")
+  : (process.env.CELO_SEPOLIA_RPC_URL ?? "https://alfajores-forno.celo-testnet.org");
 
-const agentContractAbi = parseAbi([
-  "function linkERC8004Id(address wallet, uint256 agentId) external",
-]);
+const REGISTRY_ADDRESS = IS_MAINNET
+  ? "0x8004A169FB4a3325136EB29fA0ceB6D2e539a432"
+  : "0x8004A818BFB912233c491871b3d84c89A494BD9e";
+
+// Minimal ABI — only what we use
+const REGISTRY_ABI = [
+  {
+    inputs: [{ name: "tokenURI_", type: "string" }],
+    name: "register",
+    outputs: [{ name: "agentId", type: "uint256" }],
+    stateMutability: "nonpayable",
+    type: "function",
+  },
+  {
+    anonymous: false,
+    inputs: [
+      { indexed: true, name: "agentId", type: "uint256" },
+      { indexed: false, name: "tokenURI", type: "string" },
+      { indexed: true, name: "owner", type: "address" },
+    ],
+    name: "Registered",
+    type: "event",
+  },
+] as const;
 
 export type AgentIdentityPayload = {
-  wallet: Address;
+  wallet: string;
   name: string;
-  agentURI: string;         // off-chain metadata (Pinata IPFS)
+  agentURI: string;
   personality: string;
   registeredAt: number;
+  agentPrivateKey: string; // agent's own wallet key — signs the ERC-8004 tx
 };
 
-// ─── Register with ChaosChain identity registry ──────────────────────────────
+export async function registerERC8004Agent(agent: AgentIdentityPayload): Promise<bigint> {
+  const account = privateKeyToAccount(agent.agentPrivateKey as Hex);
 
-async function registerWithChaosChain(agent: AgentIdentityPayload): Promise<bigint> {
-  if (!API_KEY || API_KEY === "...") {
-    console.warn("[erc8004] CHAOSCHAIN_API_KEY not set — skipping registration, using id=0");
-    return 0n;
-  }
-
-  const { data } = await axios.post(
-    `${CHAOSCHAIN_API}/agents/register`,
-    {
-      address: agent.wallet,
-      name: agent.name,
-      metadataURI: agent.agentURI,
-      description: agent.personality,
-      registeredAt: agent.registeredAt,
-      platform: "lemon",
-    },
-    {
-      headers: {
-        "x-api-key": API_KEY,
-        "Content-Type": "application/json",
-      },
-    }
-  );
-
-  // API returns { agentId: number, txHash: string }
-  const agentId = BigInt(data.agentId ?? data.id ?? 0);
-  console.log(`[erc8004] Registered agent ${agent.wallet} → ERC-8004 id #${agentId}`);
-  return agentId;
-}
-
-// ─── Link agentId back on-chain via LemonAgent.linkERC8004Id ─────────────────
-
-async function linkOnChain(wallet: Address, agentId: bigint): Promise<void> {
-  if (agentId === 0n) return; // nothing to link
-
-  const contractAddress = process.env.LEMON_AGENT_CONTRACT as Address;
-  const hash = await walletClient.writeContract({
-    address: contractAddress,
-    abi: agentContractAbi,
-    functionName: "linkERC8004Id",
-    args: [wallet, agentId],
+  const walletClient = createWalletClient({
+    account,
+    chain,
+    transport: http(rpcUrl),
   });
 
-  await publicClient.waitForTransactionReceipt({ hash });
-  console.log(`[erc8004] Linked ERC-8004 id #${agentId} to ${wallet} on-chain`);
-}
+  const publicClient = createPublicClient({
+    chain,
+    transport: http(rpcUrl),
+  });
 
-// ─── Public entry point ───────────────────────────────────────────────────────
+  const metadata = {
+    name: agent.name,
+    domain: "lemon.dating",
+    role: "worker",
+    description: agent.personality,
+    capabilities: ["dating", "matching", "conversation"],
+    version: "1.0.0",
+    contact: agent.wallet,
+  };
+  const tokenURI = `data:application/json,${JSON.stringify(metadata)}`;
 
-export async function registerERC8004Agent(agent: AgentIdentityPayload): Promise<bigint> {
-  try {
-    const agentId = await registerWithChaosChain(agent);
-    await linkOnChain(agent.wallet, agentId);
-    return agentId;
-  } catch (err) {
-    // Non-fatal: agent still works without an ERC-8004 id
-    console.error("[erc8004] Registration failed (non-fatal):", err);
-    return 0n;
+  console.log(`[erc8004] Registering agent "${agent.name}" on ${IS_MAINNET ? "mainnet" : "testnet"}, registry=${REGISTRY_ADDRESS}`);
+
+  const hash = await walletClient.writeContract({
+    address: REGISTRY_ADDRESS as Hex,
+    abi: REGISTRY_ABI,
+    functionName: "register",
+    args: [tokenURI],
+  });
+
+  console.log(`[erc8004] Tx sent: ${hash} — waiting for receipt…`);
+  const receipt = await publicClient.waitForTransactionReceipt({ hash });
+
+  if (receipt.status === "reverted") {
+    throw new Error(`Transaction reverted (tx: ${hash}). The registry contract may not be deployed at ${REGISTRY_ADDRESS} on this network.`);
   }
+
+  // Parse the Registered event to get agentId
+  for (const log of receipt.logs) {
+    try {
+      const decoded = decodeEventLog({
+        abi: REGISTRY_ABI,
+        eventName: "Registered",
+        topics: log.topics,
+        data: log.data,
+      });
+      const agentId = (decoded.args as { agentId: bigint }).agentId;
+      console.log(`[erc8004] ✓ Agent "${agent.name}" registered — ERC-8004 id #${agentId}, tx: ${hash}`);
+      return agentId;
+    } catch {
+      // not the Registered event — skip
+    }
+  }
+
+  throw new Error(`Registered event not found in receipt (tx: ${hash}). Logs: ${receipt.logs.length}`);
 }

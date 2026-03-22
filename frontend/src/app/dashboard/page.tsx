@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { usePrivy } from "@privy-io/react-auth";
 import { useAccount, useReadContracts } from "wagmi";
 import { ConnectButton } from "@/components/ConnectButton";
@@ -10,16 +10,19 @@ import {
   DATE_TEMPLATE_LABELS,
   LEMON_DATE_ADDRESS,
   lemonDateAbi,
+
 } from "@/lib/contracts";
 import Link from "next/link";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Separator } from "@/components/ui/separator";
 import { motion } from "framer-motion";
+import { toast } from "sonner";
 import type { Address } from "viem";
+import { avatarUriToDisplayUrlOrUndefined } from "@/lib/avatarUri";
 
 const SERVER = process.env.NEXT_PUBLIC_SERVER_URL ?? "http://localhost:4000";
 
@@ -61,10 +64,7 @@ function shortAddr(addr: string) {
 }
 
 function resolveAvatar(uri?: string | null): string | undefined {
-  if (!uri) return undefined;
-  if (uri.startsWith("ipfs://")) return `https://ipfs.io/ipfs/${uri.slice(7)}`;
-  if (uri.startsWith("http")) return uri;
-  return undefined;
+  return avatarUriToDisplayUrlOrUndefined(uri);
 }
 
 function formatTime(seconds: number) {
@@ -93,7 +93,7 @@ function useCountdown(scheduledAt: bigint | undefined) {
 
 // ── Navbar ───────────────────────────────────────────────────────────────────
 
-function DashNav({ name }: { name?: string }) {
+function DashNav({ name, avatarSrc }: { name?: string; avatarSrc?: string }) {
   return (
     <nav className="sticky top-0 z-50 flex items-center justify-between border-b border-[rgba(0,0,0,0.06)] bg-[rgba(253,250,246,0.9)] px-6 py-3 backdrop-blur-[20px]">
       <Link href="/" className="flex items-center gap-1 no-underline">
@@ -106,6 +106,7 @@ function DashNav({ name }: { name?: string }) {
         {name && (
           <div className="flex items-center gap-2">
             <Avatar className="h-7 w-7 border border-[rgba(200,146,10,0.3)] bg-[rgba(248,230,130,0.4)]">
+              {avatarSrc ? <AvatarImage src={avatarSrc} alt="" className="object-cover" /> : null}
               <AvatarFallback className="bg-transparent text-[11px] font-black text-[#92400e]">
                 {name[0].toUpperCase()}
               </AvatarFallback>
@@ -229,6 +230,9 @@ function ActiveDatePanel({ dateId, myAddress }: { dateId: bigint; myAddress: Add
     );
   }
 
+  const myAvatar = resolveAvatar(myProfile?.avatarURI);
+  const partnerAvatar = resolveAvatar(partnerProfile?.avatarURI);
+
   const isDone = remaining === 0;
 
   return (
@@ -257,6 +261,7 @@ function ActiveDatePanel({ dateId, myAddress }: { dateId: bigint; myAddress: Add
       <div className="flex items-center justify-center gap-6 rounded-2xl border border-[rgba(0,0,0,0.06)] bg-white py-6">
         <div className="flex flex-col items-center gap-2">
           <Avatar className="h-14 w-14 border-2 border-[rgba(200,146,10,0.3)] bg-[rgba(248,230,130,0.4)]">
+            {myAvatar ? <AvatarImage src={myAvatar} alt="" className="object-cover" /> : null}
             <AvatarFallback className="bg-transparent text-[20px] font-black text-[#92400e]">
               {myProfile?.name?.[0]?.toUpperCase() ?? "?"}
             </AvatarFallback>
@@ -275,6 +280,7 @@ function ActiveDatePanel({ dateId, myAddress }: { dateId: bigint; myAddress: Add
 
         <div className="flex flex-col items-center gap-2">
           <Avatar className="h-14 w-14 border-2 border-[rgba(99,102,241,0.3)] bg-[rgba(99,102,241,0.08)]">
+            {partnerAvatar ? <AvatarImage src={partnerAvatar} alt="" className="object-cover" /> : null}
             <AvatarFallback className="bg-transparent text-[20px] font-black text-indigo-600">
               {partnerProfile?.name?.[0]?.toUpperCase() ?? "?"}
             </AvatarFallback>
@@ -372,15 +378,42 @@ type LiveConvoData = {
   template_suggested?: string | null;
   shared_interests?: string[];
   transcript: { messages: LiveMessage[] };
+  bookingError?: string | null;
+  bookingPending?: boolean;
+  isStale?: boolean;
+  lastMessageAt?: number | null;
 };
 
-const DATE_TEMPLATE_DETAILS: Record<string, { emoji: string; label: string; description: string; cost: string }> = {
-  COFFEE:         { emoji: "☕", label: "Coffee Date",       description: "A relaxed cafe meetup to get to know each other",         cost: "$2.50" },
-  BEACH:          { emoji: "🏖️", label: "Beach Day",         description: "An outdoor, breezy day by the water",                     cost: "$3.00" },
-  WORK:           { emoji: "💼", label: "Co-Work Session",   description: "A productive afternoon working side by side",             cost: "$2.00" },
-  ROOFTOP_DINNER: { emoji: "🌆", label: "Rooftop Dinner",    description: "An elevated dining experience under the city lights",     cost: "$5.00" },
-  GALLERY_WALK:   { emoji: "🎨", label: "Gallery Walk",      description: "Exploring art galleries and scenic streets together",     cost: "$3.50" },
+const DATE_TEMPLATE_DETAILS: Record<string, { emoji: string; label: string; description: string; cost: string; costCents: number }> = {
+  COFFEE:         { emoji: "☕", label: "Coffee Date",       description: "A relaxed cafe meetup to get to know each other",         cost: "$0.50", costCents: 50  },
+  BEACH:          { emoji: "🏖️", label: "Beach Day",         description: "An outdoor, breezy day by the water",                     cost: "$0.75", costCents: 75  },
+  WORK:           { emoji: "💼", label: "Co-Work Session",   description: "A productive afternoon working side by side",             cost: "$0.50", costCents: 50  },
+  ROOFTOP_DINNER: { emoji: "🌆", label: "Rooftop Dinner",    description: "An elevated dining experience under the city lights",     cost: "$1.00", costCents: 100 },
+  GALLERY_WALK:   { emoji: "🎨", label: "Gallery Walk",      description: "Exploring art galleries and scenic streets together",     cost: "$0.75", costCents: 75  },
 };
+
+function TypingIndicator({ name, avatar, isA }: { name: string; avatar?: string; isA: boolean }) {
+  return (
+    <div className={`flex items-end gap-2 ${isA ? "" : "flex-row-reverse"}`}>
+      {avatar ? (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img src={avatar} alt={name} className="shrink-0 w-7 h-7 rounded-full object-cover" />
+      ) : (
+        <div className={`shrink-0 w-7 h-7 rounded-full flex items-center justify-center text-[11px] font-bold ${isA ? "bg-amber-100 text-amber-700" : "bg-indigo-100 text-indigo-700"}`}>{name[0]}</div>
+      )}
+      <div className={`flex flex-col gap-0.5 ${isA ? "items-start" : "items-end"}`}>
+        <span className="text-[10px] text-[rgba(26,18,6,0.35)] font-medium">{name} typing...</span>
+        <div className={`rounded-2xl px-3.5 py-2.5 ${isA ? "bg-white border border-[rgba(0,0,0,0.07)]" : "bg-[rgba(99,102,241,0.08)] border border-[rgba(99,102,241,0.12)]"}`}>
+          <span className="flex gap-1 items-center h-4">
+            <span className="w-1.5 h-1.5 rounded-full bg-[rgba(26,18,6,0.3)] animate-bounce" style={{ animationDelay: "0ms" }} />
+            <span className="w-1.5 h-1.5 rounded-full bg-[rgba(26,18,6,0.3)] animate-bounce" style={{ animationDelay: "150ms" }} />
+            <span className="w-1.5 h-1.5 rounded-full bg-[rgba(26,18,6,0.3)] animate-bounce" style={{ animationDelay: "300ms" }} />
+          </span>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function ChatBubble({ msg, isA, avatar, name }: { msg: LiveMessage; isA: boolean; avatar?: string; name: string }) {
   if (msg.phase === "proposal") {
@@ -442,27 +475,65 @@ function ChatBubble({ msg, isA, avatar, name }: { msg: LiveMessage; isA: boolean
 }
 
 function LiveConversationPanel({
-  convo, nameA, nameB, avatarA, avatarB, onApprove, approving,
+  convo, nameA, nameB, avatarA, avatarB, myAddress,
 }: {
   convo: LiveConvoData;
   nameA: string; nameB: string; avatarA?: string; avatarB?: string;
-  onApprove: () => void; approving: boolean;
+  myAddress?: Address;
 }) {
-  const MAX_CHAT_MESSAGES = 18; // 9 exchanges × 2 (A+B), then proposal+accepted are special
+  const SERVER_URL = process.env.NEXT_PUBLIC_SERVER_URL ?? "http://localhost:4000";
+  const MAX_CHAT_MESSAGES = 18;
   const messages: LiveMessage[] = convo.transcript?.messages ?? [];
   const chatMessages = messages.filter(m => !m.phase || m.phase === "chat");
   const hasProposal = messages.some(m => m.phase === "proposal");
   const hasAccepted = messages.some(m => m.phase === "accepted");
-  const isPendingApproval = convo.passed && !!convo.template_suggested && hasAccepted;
   const dealBreakerCount = messages.filter(m => m.dealBreakerFlagged).length;
+
+  // Booking is now fully autonomous — no user action needed
+  const bookingPending = convo.bookingPending ?? (convo.passed && !convo.bookingError);
+  const bookingError = convo.bookingError ?? null;
+  const [retrying, setRetrying] = useState(false);
+
+  async function handleRetry() {
+    setRetrying(true);
+    try {
+      await fetch(`${SERVER_URL}/api/date/retry`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ walletA: convo.wallet_a, walletB: convo.wallet_b }),
+      });
+    } catch { /* polling will show updated state */ }
+    setRetrying(false);
+  }
 
   const clampedCount = Math.min(chatMessages.length, MAX_CHAT_MESSAGES);
   const chatProgress = Math.round((clampedCount / MAX_CHAT_MESSAGES) * 100);
 
   const templateDetail = DATE_TEMPLATE_DETAILS[convo.template_suggested ?? ""] ?? null;
 
-  const phaseLabel = isPendingApproval
-    ? "✨ Date proposed"
+  // A conversation is stale if the server flagged it, OR if we locally haven't
+  // seen a new message in >5 min (belt-and-suspenders in case server is slow to update)
+  const lastMsgTs = convo.lastMessageAt ?? (messages.length > 0 ? messages[messages.length - 1].timestamp : 0);
+  const isStale = convo.isStale || (!convo.passed && messages.length > 0 && lastMsgTs > 0 && Date.now() - lastMsgTs > 5 * 60 * 1000);
+
+  // Only show typing if the conversation is actively progressing:
+  // last message arrived < 90s ago, not stale, not passed, no deal breakers, no proposal yet
+  const showTyping = messages.length > 0
+    && !convo.passed
+    && !isStale
+    && dealBreakerCount < 3
+    && !hasProposal
+    && lastMsgTs > 0
+    && Date.now() - lastMsgTs < 90_000;
+
+  const phaseLabel = isStale
+    ? "⚠️ Conversation stalled"
+    : convo.passed && convo.bookingError
+    ? "⚠️ Booking failed"
+    : convo.passed && bookingPending
+    ? "✨ Booking your date…"
+    : convo.passed
+    ? "✓ Date booked!"
     : hasProposal
     ? "Proposing date…"
     : dealBreakerCount >= 3
@@ -476,7 +547,11 @@ function LiveConversationPanel({
       {/* ── Header ── */}
       <div className="flex items-center justify-between shrink-0">
         <div className="flex items-center gap-2">
-          {isPendingApproval ? (
+          {isStale ? (
+            <span className="flex h-2 w-2 rounded-full bg-amber-400" />
+          ) : convo.passed && bookingError ? (
+            <span className="flex h-2 w-2 rounded-full bg-red-400" />
+          ) : convo.passed ? (
             <span className="flex h-2 w-2 rounded-full bg-amber-400 animate-pulse" />
           ) : dealBreakerCount >= 3 ? (
             <span className="flex h-2 w-2 rounded-full bg-red-400" />
@@ -498,13 +573,34 @@ function LiveConversationPanel({
       {/* ── Progress bar ── */}
       <div className="h-1 rounded-full bg-[rgba(0,0,0,0.06)] overflow-hidden shrink-0">
         <div
-          className={`h-full rounded-full transition-all duration-500 ${isPendingApproval ? "bg-amber-400" : dealBreakerCount >= 3 ? "bg-red-300" : "bg-green-400"}`}
-          style={{ width: `${isPendingApproval ? 100 : chatProgress}%` }}
+          className={`h-full rounded-full transition-all duration-500 ${convo.passed ? "bg-amber-400" : dealBreakerCount >= 3 ? "bg-red-300" : "bg-green-400"}`}
+          style={{ width: `${convo.passed ? 100 : chatProgress}%` }}
         />
       </div>
 
       {/* ── Chat window ── */}
       <div className="flex-1 min-h-0 overflow-y-auto flex flex-col-reverse rounded-2xl border border-[rgba(0,0,0,0.06)] bg-[#FDFAF6] px-3 py-3 gap-2.5">
+        {/* Typing indicator — first in DOM = bottom of flex-col-reverse = most recent position */}
+        {showTyping && (() => {
+          const lastSpeaker = messages[messages.length - 1].speaker;
+          const nextIsA = lastSpeaker === "B";
+          return (
+            <TypingIndicator
+              name={nextIsA ? nameA : nameB}
+              avatar={nextIsA ? avatarA : avatarB}
+              isA={nextIsA}
+            />
+          );
+        })()}
+
+        {/* Stalled banner — conversation died before completing */}
+        {isStale && (
+          <div className="flex items-center gap-2 text-[12px] text-amber-700 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2">
+            <span>⚠️</span>
+            <span>Conversation stalled — a new one will start automatically on the next match cycle.</span>
+          </div>
+        )}
+
         {messages.length === 0 ? (
           <div className="flex items-center gap-2 text-[14px] text-[rgba(26,18,6,0.4)]">
             <span className="w-4 h-4 rounded-full border-2 border-amber-400 border-t-transparent animate-spin" />
@@ -524,32 +620,41 @@ function LiveConversationPanel({
         })}
       </div>
 
-      {/* ── Approval card ── */}
-      {isPendingApproval && templateDetail && (
-        <div className="shrink-0 rounded-2xl border border-amber-200 bg-amber-50 p-4 flex flex-col gap-3">
-          <div className="flex items-start justify-between gap-3">
-            <div className="flex items-center gap-3">
-              <span className="text-3xl">{templateDetail.emoji}</span>
-              <div>
-                <p className="text-[15px] font-bold text-[#1a1206]">{templateDetail.label}</p>
-                <p className="text-[12px] text-[rgba(26,18,6,0.5)] leading-snug">{templateDetail.description}</p>
-              </div>
+      {/* ── Booking status card (fully autonomous — no user action needed) ── */}
+      {convo.passed && templateDetail && (
+        <div className={`shrink-0 rounded-2xl border p-4 flex flex-col gap-2 ${bookingError ? "border-red-200 bg-red-50" : "border-amber-200 bg-amber-50"}`}>
+          <div className="flex items-center gap-3">
+            <span className="text-2xl">{templateDetail.emoji}</span>
+            <div className="flex-1 min-w-0">
+              <p className="text-[14px] font-bold text-[#1a1206]">{templateDetail.label}</p>
+              {bookingError ? (
+                <p className="text-[11px] text-red-500 leading-snug truncate">Booking failed — {bookingError}</p>
+              ) : bookingPending ? (
+                <p className="text-[11px] text-amber-700 leading-snug">Your agent is booking the date…</p>
+              ) : (
+                <p className="text-[11px] text-emerald-600 leading-snug">Date booked! Check your history.</p>
+              )}
             </div>
             <div className="text-right shrink-0">
-              <p className="text-[18px] font-black text-[#D6820A]">{templateDetail.cost}</p>
-              <p className="text-[10px] text-[rgba(26,18,6,0.4)]">in cUSD</p>
+              <p className="text-[15px] font-black text-[#D6820A]">{templateDetail.cost}</p>
+              <p className="text-[9px] text-[rgba(26,18,6,0.4)]">cUSD</p>
             </div>
           </div>
-          <button
-            onClick={onApprove}
-            disabled={approving}
-            className="w-full rounded-xl bg-[#D6820A] py-3 text-[14px] font-bold text-white shadow-sm hover:bg-[#b8690a] transition-colors disabled:opacity-60 cursor-pointer"
-          >
-            {approving ? "Booking…" : `Approve date — ${templateDetail.label} ${templateDetail.emoji}`}
-          </button>
-          <p className="text-[11px] text-center text-[rgba(26,18,6,0.35)]">
-            Your agents hit it off! Approve to lock in the date, mint the memory NFT, and pay via x402.
-          </p>
+          {bookingPending && !bookingError && (
+            <div className="flex items-center gap-2">
+              <span className="w-3 h-3 rounded-full border-2 border-amber-500 border-t-transparent animate-spin shrink-0" />
+              <p className="text-[11px] text-[rgba(26,18,6,0.45)]">Booking on-chain, minting NFT… this takes ~30s</p>
+            </div>
+          )}
+          {bookingError && (
+            <button
+              onClick={handleRetry}
+              disabled={retrying}
+              className="w-full rounded-xl bg-red-500 py-2 text-[13px] font-bold text-white disabled:opacity-50 cursor-pointer hover:bg-red-600 transition-colors"
+            >
+              {retrying ? "Retrying…" : "Retry booking"}
+            </button>
+          )}
         </div>
       )}
     </div>
@@ -558,7 +663,7 @@ function LiveConversationPanel({
 
 // ── Idle Panel ────────────────────────────────────────────────────────────────
 
-type PoolStatus = { total: number; busy: number; available: number };
+type PoolStatus = { total: number; verified: number; busy: number; available: number; totalDates: number };
 
 function IdlePanel({ name }: { name?: string }) {
   const [pool, setPool] = useState<PoolStatus | null>(null);
@@ -567,40 +672,51 @@ function IdlePanel({ name }: { name?: string }) {
 
   const SERVER = process.env.NEXT_PUBLIC_SERVER_URL ?? "http://localhost:4000";
 
-  async function fetchPool() {
-    try {
-      const r = await fetch(`${SERVER}/api/agents/pool-status`);
-      setPool(await r.json());
-    } catch {}
-  }
-
   async function triggerMatch() {
     setChecking(true);
     try {
       await fetch(`${SERVER}/api/match/run`, { method: "POST" });
       setLastChecked(new Date());
-      await fetchPool();
+      // Refresh pool status after triggering a match
+      const r = await fetch(`${SERVER}/api/agents/pool-status`);
+      if (r.ok) setPool(await r.json());
     } catch {}
     setChecking(false);
   }
 
   useEffect(() => {
-    fetchPool();
-    const id = setInterval(fetchPool, 15_000);
+    let failures = 0;
+    let id: ReturnType<typeof setInterval>;
+    const safeFetchPool = async () => {
+      try {
+        const r = await fetch(`${SERVER}/api/agents/pool-status`);
+        if (!r.ok) { failures++; return; }
+        failures = 0;
+        setPool(await r.json());
+      } catch {
+        failures++;
+        if (failures === 2) {
+          clearInterval(id);
+          id = setInterval(safeFetchPool, 60_000); // slow to 1 min when server is down
+        }
+      }
+    };
+    safeFetchPool();
+    id = setInterval(safeFetchPool, 15_000);
     return () => clearInterval(id);
   }, []);
 
   // Determine which state to show
-  const { total = 0, busy = 0, available = 0 } = pool ?? {};
+  const { total = 0, available = 0 } = pool ?? {};
   const othersAvailable = available - 1; // exclude self
 
-  type IdleState = "no-agents" | "only-you" | "everyone-busy" | "looking";
+  type IdleState = "no-agents" | "only-you" | "looking";
   const state: IdleState = !pool
     ? "looking"
     : total <= 1
     ? "no-agents"
     : othersAvailable <= 0
-    ? "everyone-busy"
+    ? "only-you"
     : "looking";
 
   const content: Record<IdleState, { emoji: string; title: string; subtitle: string; showButton: boolean }> = {
@@ -616,16 +732,10 @@ function IdlePanel({ name }: { name?: string }) {
       subtitle: `Only ${total} agent${total !== 1 ? "s" : ""} registered so far. Matching starts automatically once more join.`,
       showButton: false,
     },
-    "everyone-busy": {
-      emoji: "💛",
-      title: "Everyone's on a date!",
-      subtitle: `All ${total} agents are paired up right now. Your agent will be matched as soon as someone finishes — dates last ~30 min.`,
-      showButton: false,
-    },
     "looking": {
       emoji: "🔍",
       title: "Looking for a match",
-      subtitle: `${name ?? "Your agent"} is in the pool with ${othersAvailable} other available agent${othersAvailable !== 1 ? "s" : ""}. Matching runs automatically every few minutes.`,
+      subtitle: `${name ?? "Your agent"} is in the pool with ${othersAvailable} other agent${othersAvailable !== 1 ? "s" : ""}. Matching runs automatically every few minutes.`,
       showButton: true,
     },
   };
@@ -653,19 +763,19 @@ function IdlePanel({ name }: { name?: string }) {
             <span className="h-[7px] w-[7px] rounded-full bg-[rgba(0,0,0,0.15)]" />{total} registered
           </span>
           <span className="text-[rgba(26,18,6,0.15)]">·</span>
-          <span className="flex items-center gap-1.5 text-[12px] font-semibold text-amber-600">
-            <span className="h-[7px] w-[7px] rounded-full bg-amber-400 animate-pulse" />{busy} on dates
+          <span className="flex items-center gap-1.5 text-[12px] font-semibold text-emerald-600">
+            <span className="h-[7px] w-[7px] rounded-full bg-emerald-400" />{pool.verified} verified
           </span>
           <span className="text-[rgba(26,18,6,0.15)]">·</span>
-          <span className="flex items-center gap-1.5 text-[12px] font-semibold text-emerald-600">
-            <span className="h-[7px] w-[7px] rounded-full bg-emerald-400" />{available} free
+          <span className="flex items-center gap-1.5 text-[12px] font-semibold text-amber-600">
+            <span className="h-[7px] w-[7px] rounded-full bg-amber-400" />{pool.totalDates} dates
           </span>
         </div>
       )}
 
-      {state === "everyone-busy" && (
+      {state === "only-you" && (
         <p className="text-[12px] text-[rgba(26,18,6,0.35)]">
-          Check back in ~30 minutes ☕
+          Invite a friend to join 🍋
         </p>
       )}
 
@@ -825,6 +935,236 @@ function RevealSection({ myAddress, partnerAddresses }: { myAddress: Address; pa
 
 // ── History Panel ─────────────────────────────────────────────────────────────
 
+function fireConfetti() {
+  // Only run in browser
+  if (typeof window === "undefined") return;
+  import("canvas-confetti").then(({ default: confetti }) => {
+    confetti({ particleCount: 120, spread: 80, origin: { y: 0.55 }, colors: ["#D6820A", "#f59e0b", "#fcd34d", "#10b981", "#6366f1"] });
+    setTimeout(() => confetti({ particleCount: 60, spread: 50, origin: { y: 0.5, x: 0.3 }, colors: ["#D6820A", "#fcd34d"] }), 250);
+    setTimeout(() => confetti({ particleCount: 60, spread: 50, origin: { y: 0.5, x: 0.7 }, colors: ["#10b981", "#6366f1"] }), 400);
+  });
+}
+
+const IS_MAINNET = process.env.NEXT_PUBLIC_NETWORK === "mainnet";
+const REGISTRY_CONTRACT = IS_MAINNET
+  ? "0x8004A169FB4a3325136EB29fA0ceB6D2e539a432"
+  : "0x8004A818BFB912233c491871b3d84c89A494BD9e";
+const CELOSCAN_BASE = IS_MAINNET
+  ? "https://celoscan.io"
+  : "https://sepolia.celoscan.io";
+
+function IdentityBadge({ agentId }: { agentId: string }) {
+  const [copied, setCopied] = useState(false);
+  function copy() {
+    navigator.clipboard.writeText(agentId).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    });
+  }
+  const explorerUrl = `${CELOSCAN_BASE}/token/${REGISTRY_CONTRACT}?a=${agentId}`;
+  return (
+    <div className="flex items-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2">
+      <span className="flex h-5 w-5 items-center justify-center rounded-full bg-emerald-500 text-white text-[10px] font-bold shrink-0">✓</span>
+      <div className="flex-1 min-w-0">
+        <p className="text-[10px] font-bold uppercase tracking-wider text-emerald-700">ChaosChain Identity</p>
+        <p className="text-[11px] font-mono text-emerald-900 truncate">ID #{agentId}</p>
+      </div>
+      <a
+        href={explorerUrl}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="shrink-0 text-emerald-400 hover:text-emerald-700 transition-colors"
+        title="View on CeloScan"
+      >
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" /><polyline points="15 3 21 3 21 9" /><line x1="10" y1="14" x2="21" y2="3" /></svg>
+      </a>
+      <button onClick={copy} className="shrink-0 text-emerald-400 hover:text-emerald-700 transition-colors" title="Copy ID">
+        {copied ? (
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12" /></svg>
+        ) : (
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></svg>
+        )}
+      </button>
+    </div>
+  );
+}
+
+function GetIdentityCard({
+  myAddress,
+  SERVER_URL,
+  onSuccess,
+}: {
+  myAddress: Address;
+  SERVER_URL: string;
+  onSuccess: (agentId: string) => void;
+}) {
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [agentId, setAgentId] = useState<string | null>(null);
+
+  async function registerIdentity() {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch(`${SERVER_URL}/api/agents/${myAddress}/register-identity`, { method: "POST" });
+      const data = await res.json();
+      if (res.ok && data.erc8004AgentId && data.erc8004AgentId !== "0") {
+        setAgentId(data.erc8004AgentId);
+        onSuccess(data.erc8004AgentId);
+        fireConfetti();
+        toast.success("Identity registered on ChaosChain!", {
+          description: `ERC-8004 Agent ID #${data.erc8004AgentId}`,
+          duration: 6000,
+        });
+      } else {
+        const msg = data.error ?? "Registration failed — try again later.";
+        setError(msg);
+        toast.error("Identity registration failed", { description: msg });
+      }
+    } catch {
+      const msg = "Could not reach server — check your connection.";
+      setError(msg);
+      toast.error(msg);
+    }
+    setLoading(false);
+  }
+
+  if (agentId) {
+    return <IdentityBadge agentId={agentId} />;
+  }
+
+  return (
+    <div className="rounded-2xl border border-orange-200 bg-orange-50 p-4 flex flex-col gap-3">
+      <div>
+        <p className="text-[13px] font-bold text-[#1a1206] mb-0.5">⚠️ Your agent has no identity</p>
+        <p className="text-[11.5px] text-[rgba(26,18,6,0.5)] leading-snug">
+          The ChaosChain identity registration failed when your agent was created. Register now to give your agent an on-chain ERC-8004 identity.
+        </p>
+      </div>
+      {error && (
+        <p className="text-[11px] text-red-600 font-medium">{error}</p>
+      )}
+      <button
+        onClick={registerIdentity}
+        disabled={loading}
+        className="rounded-xl bg-orange-500 py-2 text-[13px] font-bold text-white disabled:opacity-40 cursor-pointer hover:bg-orange-600 transition-colors"
+      >
+        {loading ? "Registering on ChaosChain…" : "Register Identity on ChaosChain"}
+      </button>
+    </div>
+  );
+}
+
+function VerifyIdentityCard({ myAddress, SERVER_URL }: { myAddress: Address; SERVER_URL: string }) {
+  const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
+  const [deepLink, setDeepLink] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [verified, setVerified] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function startVerification() {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch(`${SERVER_URL}/api/agents/${myAddress}/selfclaw/retry`, { method: "POST" });
+      const data = await res.json();
+
+      if (!res.ok) {
+        setError(data.error ?? "Failed to start verification");
+        return;
+      }
+
+      if (data.verified) {
+        setVerified(true);
+        return;
+      }
+
+      // Server returns { qrData, deepLink } — show QR so user can scan
+      const qr = data.qrData ?? data.qrUrl ?? data.qr_url ?? null;
+      const link = data.deepLink ?? data.deep_link ?? null;
+
+      if (!qr && !link) {
+        setError("Could not get verification QR — check server logs");
+        return;
+      }
+
+      setQrDataUrl(qr);
+      setDeepLink(link);
+
+      // Poll until verified
+      const interval = setInterval(async () => {
+        try {
+          const r = await fetch(`${SERVER_URL}/api/agents/${myAddress}/selfclaw`);
+          const d = await r.json();
+          if (d.verified || d.selfclaw_verified) {
+            clearInterval(interval);
+            setVerified(true);
+          }
+        } catch { /* transient — keep polling */ }
+      }, 4000);
+    } catch (err) {
+      setError((err as Error).message ?? "Network error");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  if (verified) {
+    return (
+      <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 flex items-center gap-3">
+        <span className="text-emerald-500 text-lg">✓</span>
+        <div>
+          <p className="text-[13px] font-semibold text-emerald-800">Identity verified!</p>
+          <p className="text-[11px] text-emerald-600">Your agent now has on-chain reputation.</p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="rounded-2xl border border-purple-200 bg-purple-50 p-4 flex flex-col gap-3">
+      <div>
+        <p className="text-[13px] font-bold text-[#1a1206] mb-0.5">🪪 Verify your identity</p>
+        <p className="text-[11.5px] text-[rgba(26,18,6,0.5)] leading-snug">
+          Scan with the Self app to prove you&apos;re human and earn your agent&apos;s on-chain reputation.
+        </p>
+      </div>
+      {error && (
+        <p className="text-[11px] text-red-600 font-medium bg-red-50 rounded-lg px-2 py-1">{error}</p>
+      )}
+      {(qrDataUrl || deepLink) ? (
+        <div className="flex flex-col items-center gap-2">
+          {qrDataUrl ? (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img src={qrDataUrl} alt="Self verification QR code" className="w-64 h-64 rounded-xl border border-purple-200" />
+          ) : (
+            <a href={deepLink!} target="_blank" rel="noopener noreferrer"
+              className="text-[12px] text-purple-700 underline break-all text-center">
+              Open Self app link
+            </a>
+          )}
+          <div className="w-full rounded-xl bg-amber-50 border border-amber-200 px-3 py-2 text-center">
+            <p className="text-[11px] font-bold text-amber-800">Open the Self app → tap Scan</p>
+            <p className="text-[10px] text-amber-600 mt-0.5">Point the Self app scanner at this QR code to verify</p>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <span className="w-2 h-2 rounded-full border-2 border-purple-500 border-t-transparent animate-spin" />
+            <span className="text-[10px] text-purple-600">Polling for completion</span>
+          </div>
+        </div>
+      ) : (
+        <button
+          onClick={startVerification}
+          disabled={loading}
+          className="rounded-xl bg-purple-600 py-2 text-[13px] font-bold text-white disabled:opacity-40 cursor-pointer hover:bg-purple-700 transition-colors"
+        >
+          {loading ? "Starting verification…" : "Verify with SelfClaw"}
+        </button>
+      )}
+    </div>
+  );
+}
+
 function SetupRevealCard({ myAddress }: { myAddress: Address }) {
   const [saved, setSaved] = useState(false);
   const [telegram, setTelegram] = useState("");
@@ -904,6 +1244,9 @@ function HistoryPanel({
 }) {
   const hasCompletedDate = (stats?.datesCompleted ?? 0) > 0;
   const [hasRevealInfo, setHasRevealInfo] = useState<boolean | null>(null);
+  const [isVerified, setIsVerified] = useState<boolean | null>(null);
+  const [hasIdentity, setHasIdentity] = useState<boolean | null>(null);
+  const [identityId, setIdentityId] = useState<string | null>(null);
   const SERVER_URL = process.env.NEXT_PUBLIC_SERVER_URL ?? "http://localhost:4000";
 
   useEffect(() => {
@@ -912,6 +1255,24 @@ function HistoryPanel({
       .then(d => setHasRevealInfo(!!(d.telegram_handle || d.email || d.phone)))
       .catch(() => setHasRevealInfo(false));
   }, [myAddress, SERVER_URL]);
+
+  useEffect(() => {
+    fetch(`${SERVER_URL}/api/agents/${myAddress}`)
+      .then(r => r.json())
+      .then(d => {
+        const id = d.erc8004_agent_id;
+        const hasId = !!(id && id !== "0");
+        setHasIdentity(hasId);
+        setIdentityId(hasId ? id : null);
+        setIsVerified(!!(d.selfclaw_verified));
+      })
+      .catch(() => { setIsVerified(null); setHasIdentity(null); });
+  }, [myAddress, SERVER_URL]);
+
+  const handleIdentitySuccess = useCallback((agentId: string) => {
+    setHasIdentity(true);
+    setIdentityId(agentId);
+  }, []);
 
   return (
     <div className="flex h-full flex-col gap-4 overflow-y-auto">
@@ -933,6 +1294,30 @@ function HistoryPanel({
       </div>
 
       <Separator className="bg-[rgba(0,0,0,0.06)]" />
+
+      {/* Identity badge — always show when registered */}
+      {hasIdentity === true && identityId && (
+        <>
+          <IdentityBadge agentId={identityId} />
+          <Separator className="bg-[rgba(0,0,0,0.06)]" />
+        </>
+      )}
+
+      {/* Get identity prompt — show if ERC-8004 registration failed */}
+      {hasIdentity === false && (
+        <>
+          <GetIdentityCard myAddress={myAddress} SERVER_URL={SERVER_URL} onSuccess={handleIdentitySuccess} />
+          <Separator className="bg-[rgba(0,0,0,0.06)]" />
+        </>
+      )}
+
+      {/* Verify identity prompt — show if agent exists but not yet verified */}
+      {hasIdentity !== false && isVerified === false && (
+        <>
+          <VerifyIdentityCard myAddress={myAddress} SERVER_URL={SERVER_URL} />
+          <Separator className="bg-[rgba(0,0,0,0.06)]" />
+        </>
+      )}
 
       {/* Reveal setup prompt — show after first date if not yet set */}
       {hasCompletedDate && hasRevealInfo === false && (
@@ -1052,45 +1437,34 @@ export default function DashboardPage() {
 
   // Poll for live/pending conversation
   const [liveConvo, setLiveConvo] = useState<LiveConvoData | null>(null);
-  const [approving, setApproving] = useState(false);
   const livePartnerAddr = liveConvo
     ? (liveConvo.wallet_a.toLowerCase() === address?.toLowerCase() ? liveConvo.wallet_b : liveConvo.wallet_a) as Address
     : undefined;
   const { data: livePartnerProfile } = useAgentProfile(livePartnerAddr);
   useEffect(() => {
     if (!address || activeDateId !== undefined) return;
+    let failures = 0;
+    let id: ReturnType<typeof setInterval>;
     const poll = async () => {
       try {
         const r = await fetch(`${SERVER}/api/conversation/live?wallet=${address}`);
+        if (!r.ok) { failures++; return; }
+        failures = 0;
         const data = await r.json();
         setLiveConvo(data ?? null);
-      } catch {}
+      } catch {
+        failures++;
+        // Back off: slow poll to 15s after 3 consecutive failures (server likely down)
+        if (failures === 3) {
+          clearInterval(id);
+          id = setInterval(poll, 15_000);
+        }
+      }
     };
     poll();
-    const id = setInterval(poll, 2500);
+    id = setInterval(poll, 4_000);
     return () => clearInterval(id);
   }, [address, activeDateId]);
-
-  async function handleApproveDate() {
-    if (!liveConvo || !liveConvo.template_suggested) return;
-    setApproving(true);
-    try {
-      const res = await fetch(`${SERVER}/api/date/book`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          walletA: liveConvo.wallet_a,
-          walletB: liveConvo.wallet_b,
-          template: liveConvo.template_suggested,
-          sharedInterests: liveConvo.shared_interests ?? [],
-        }),
-      });
-      if (res.ok) {
-        setLiveConvo(null); // clear so active date panel picks up
-      }
-    } catch {}
-    setApproving(false);
-  }
 
   // Unique partners from recent completed dates (for reveal eligibility checks)
   const partnerAddresses: Address[] = (() => {
@@ -1120,7 +1494,7 @@ export default function DashboardPage() {
 
   return (
     <div className="flex min-h-screen flex-col bg-[#FDFAF6]">
-      <DashNav name={profile?.name} />
+      <DashNav name={profile?.name} avatarSrc={resolveAvatar(profile?.avatarURI)} />
 
       {/* ── Desktop two-column layout ── */}
       <div className="mx-auto hidden w-full max-w-[1200px] flex-1 gap-6 px-6 py-6 lg:flex">
@@ -1135,8 +1509,7 @@ export default function DashboardPage() {
               nameB={livePartnerProfile?.name ?? liveConvo.wallet_b.slice(0, 6)}
               avatarA={resolveAvatar(profile?.avatarURI)}
               avatarB={resolveAvatar(livePartnerProfile?.avatarURI)}
-              onApprove={handleApproveDate}
-              approving={approving}
+              myAddress={address}
             />
           ) : (
             <IdlePanel name={profile?.name} />

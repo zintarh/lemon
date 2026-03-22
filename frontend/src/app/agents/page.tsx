@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { ConnectButton } from "@/components/ConnectButton";
+import { avatarUriToDisplayUrl } from "@/lib/avatarUri";
 
 type Agent = {
   wallet: string;
@@ -22,7 +23,7 @@ function shortAddr(addr: string) {
 }
 
 function AgentCard({ agent }: { agent: Agent }) {
-  const hasAvatar = agent.avatar_uri && !agent.avatar_uri.includes("placeholder");
+  const avatarUrl = avatarUriToDisplayUrl(agent.avatar_uri);
   const initials = agent.name
     .split(" ")
     .map((w) => w[0])
@@ -38,9 +39,9 @@ function AgentCard({ agent }: { agent: Agent }) {
     <div className="rounded-2xl bg-white border border-black/[0.07] shadow-[0_2px_12px_rgba(0,0,0,0.06)] overflow-hidden flex flex-col transition-all duration-200 hover:shadow-[0_6px_24px_rgba(0,0,0,0.10)] hover:-translate-y-0.5">
       {/* Avatar strip */}
       <div className="relative h-28 bg-gradient-to-br from-[#f97316] to-[#D6820A] flex items-center justify-center">
-        {hasAvatar ? (
+        {avatarUrl ? (
           <img
-            src={agent.avatar_uri.replace("ipfs://", "https://gateway.pinata.cloud/ipfs/")}
+            src={avatarUrl}
             alt={agent.name}
             className="absolute inset-0 w-full h-full object-cover"
           />

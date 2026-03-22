@@ -1,117 +1,163 @@
 /**
- * selfclaw.ts — Human verification via @selfxyz/agent-sdk
+ * selfclaw.ts — Human verification via Self Agent ID REST API
+ *
+ * Docs: https://app.ai.self.xyz/api-docs
  *
  * Flow:
- *  1. Server calls startSelfSession(wallet) → gets deepLink + sessionToken
- *  2. deepLink is converted to a QR code data-URL and returned to frontend
- *  3. User scans QR with the Self app on their phone
- *  4. pollAndUpdateDB() runs in background, polls until verified, then writes DB
+ *  1. POST /register  → sessionToken + qrImageBase64 + deepLink + agentAddress
+ *  2. Display QR (already rendered by API) / deepLink to user
+ *  3. User scans with Self app → passport proof submitted on-chain
+ *  4. Poll GET /register/status with Bearer token until stage === "completed"
+ *  5. On completed → write agentAddress as humanId to DB, set selfclaw_verified = true
  */
 
-import { requestRegistration } from "@selfxyz/agent-sdk";
-import QRCode from "qrcode";
 import type { Address } from "viem";
 
-const NETWORK = (process.env.NETWORK === "mainnet" ? "mainnet" : "testnet") as "mainnet" | "testnet";
+const BASE = "https://app.ai.self.xyz/api/agent";
 
-// ─── Start a registration session ────────────────────────────────────────────
+// ─── Session type ─────────────────────────────────────────────────────────────
 
 export interface SelfSession {
   sessionToken: string;
   deepLink: string;
-  qrDataUrl: string | null;   // data: URI — send to frontend
+  qrDataUrl: string | null;   // data:image/png;base64,... — ready to use in <img src>
   agentAddress: string | null;
+  // Kept for API compatibility (no longer used by new API)
+  publicKey: string;
+  privateKey: string;
 }
+
+// ─── Start a verification session ─────────────────────────────────────────────
 
 export async function startSelfSession(params: {
   wallet: Address;
   agentName: string;
   agentDescription?: string;
-}): Promise<SelfSession | null> {
-  const { wallet, agentName, agentDescription } = params;
+  existingPublicKey?: string;
+  existingPrivateKey?: string;
+}): Promise<SelfSession> {
+  const network = (process.env.NETWORK ?? "testnet") === "mainnet" ? "mainnet" : "testnet";
 
-  try {
-    const session = await requestRegistration({
+  console.log(`[self-agent-id] POST /register → wallet=${params.wallet} network=${network}`);
+
+  const res = await fetch(`${BASE}/register`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
       mode: "linked",
-      network: NETWORK,
-      humanAddress: wallet,
-      agentName: agentName.slice(0, 40),
-      agentDescription: agentDescription ?? `Lemon AI dating agent`,
-      disclosures: { ofac: true },
-    });
+      network,
+      humanAddress: params.wallet,
+    }),
+  });
 
-    // Convert deepLink → QR code data URL so frontend can render it
-    let qrDataUrl: string | null = null;
-    try {
-      qrDataUrl = await QRCode.toDataURL(session.deepLink, {
-        width: 256,
-        margin: 2,
-        color: { dark: "#1a1206", light: "#ffffff" },
-      });
-    } catch (qrErr) {
-      console.warn("[self] QR generation failed:", qrErr);
-    }
-
-    console.log(`[self] Session created for ${wallet}: token=${session.sessionToken.slice(0, 12)}…`);
-
-    return {
-      sessionToken: session.sessionToken,
-      deepLink: session.deepLink,
-      qrDataUrl,
-      agentAddress: session.agentAddress ?? null,
-    };
-  } catch (err) {
-    console.error("[self] requestRegistration failed:", (err as Error).message);
-    return null;
+  const text = await res.text();
+  if (!res.ok) {
+    throw new Error(`[self-agent-id] /register ${res.status}: ${text.slice(0, 300)}`);
   }
+
+  let data: {
+    sessionToken: string;
+    stage: string;
+    qrImageBase64?: string;
+    deepLink?: string;
+    agentAddress?: string;
+    [key: string]: unknown;
+  };
+  try {
+    data = JSON.parse(text);
+  } catch {
+    throw new Error(`[self-agent-id] /register returned non-JSON: ${text.slice(0, 200)}`);
+  }
+
+  if (!data.sessionToken) {
+    throw new Error(`[self-agent-id] /register missing sessionToken. Got: ${JSON.stringify(data).slice(0, 200)}`);
+  }
+
+  console.log(`[self-agent-id] /register ok, stage=${data.stage}, agentAddress=${data.agentAddress}`);
+
+  // API returns raw base64 PNG (no data URL prefix)
+  const qrDataUrl = data.qrImageBase64
+    ? `data:image/png;base64,${data.qrImageBase64}`
+    : null;
+
+  return {
+    sessionToken: data.sessionToken,
+    deepLink: data.deepLink ?? "",
+    qrDataUrl,
+    agentAddress: data.agentAddress ?? null,
+    publicKey: "",   // not used by new API
+    privateKey: "",  // not used by new API
+  };
 }
 
-// ─── Background poll ──────────────────────────────────────────────────────────
+// ─── Background poller ────────────────────────────────────────────────────────
 
 export async function pollAndUpdateDB(
   sessionToken: string,
-  wallet: Address,
-  agentName: string,
-  agentDescription: string | undefined,
+  _wallet: Address,
+  _agentName: string,
+  _agentDescription: string | undefined,
   onVerified: (humanId: string) => Promise<void>
 ): Promise<void> {
-  try {
-    // Re-hydrate session from token to resume polling
-    const session = await requestRegistration({
-      mode: "linked",
-      network: NETWORK,
-      humanAddress: wallet,
-      agentName: agentName.slice(0, 40),
-      agentDescription: agentDescription ?? `Lemon AI dating agent`,
-      disclosures: { ofac: true },
-    });
+  const timeoutAt = Date.now() + 30 * 60 * 1000; // 30 min max (session TTL is 30 min)
+  console.log(`[self-agent-id] Polling register/status for session ${sessionToken.slice(0, 20)}…`);
 
-    // Use the returned session's waitForCompletion (5 min timeout)
-    const result = await session.waitForCompletion({ timeoutMs: 5 * 60 * 1000 });
+  while (Date.now() < timeoutAt) {
+    await new Promise<void>((r) => setTimeout(r, 7_000));
+    try {
+      const res = await fetch(`${BASE}/register/status`, {
+        headers: { Authorization: `Bearer ${sessionToken}` },
+      });
 
-    if (result) {
-      const humanId = result.agentId?.toString() ?? session.agentAddress ?? "";
-      console.log(`[self] Verified: wallet=${wallet} humanId=${humanId}`);
-      await onVerified(humanId);
+      if (res.status === 410) {
+        console.log("[self-agent-id] Session expired (410)");
+        return;
+      }
+      if (!res.ok) {
+        console.warn(`[self-agent-id] /register/status ${res.status}`);
+        continue;
+      }
+
+      const data = await res.json() as {
+        stage?: string;
+        agentId?: string | number;
+        agentAddress?: string;
+        sessionToken?: string;
+        [key: string]: unknown;
+      };
+
+      console.log(`[self-agent-id] poll stage=${data.stage}`);
+
+      // Update the rolling session token if refreshed
+      if (data.sessionToken) {
+        sessionToken = data.sessionToken;
+      }
+
+      if (data.stage === "completed") {
+        const humanId = (data.agentAddress as string | undefined)
+          ?? String(data.agentId ?? "");
+        console.log(`[self-agent-id] ✓ Verified! humanId=${humanId}`);
+        await onVerified(humanId);
+        return;
+      }
+
+      if (data.stage === "failed" || data.stage === "expired") {
+        console.log(`[self-agent-id] Session ended with stage=${data.stage}`);
+        return;
+      }
+    } catch (e) {
+      console.warn("[self-agent-id] poll error:", (e as Error).message);
     }
-  } catch (err) {
-    console.warn(`[self] pollAndUpdateDB failed for ${wallet}:`, (err as Error).message);
   }
+  console.warn("[self-agent-id] Polling timed out");
 }
 
-// ─── Check on-chain status ────────────────────────────────────────────────────
+// ─── Quick status check (kept for API compatibility — reads from DB state) ───
 
-export async function checkSelfStatus(wallet: Address): Promise<{
-  verified: boolean;
-  humanId: string | null;
-}> {
-  try {
-    const { getAgentsForHuman } = await import("@selfxyz/agent-sdk");
-    const agents = await getAgentsForHuman(wallet, { network: NETWORK });
-    const verified = Array.isArray(agents) && agents.length > 0;
-    const humanId = verified ? (agents[0]?.agentId?.toString() ?? null) : null;
-    return { verified, humanId };
-  } catch {
-    return { verified: false, humanId: null };
-  }
+export async function checkSelfStatus(
+  _wallet: Address,
+  _publicKey?: string
+): Promise<{ verified: boolean; humanId: string | null }> {
+  // Status is now tracked entirely via DB; no external check needed.
+  return { verified: false, humanId: null };
 }

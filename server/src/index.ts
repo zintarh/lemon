@@ -30,7 +30,7 @@ import {
   fundAgentWallet,
 } from "./onchain.js";
 import { postDateTweet } from "./twitter.js";
-import { checkSelfStatus, startSelfSession, pollAndUpdateDB } from "./selfclaw.js";
+import { startSelfSession, pollAndUpdateDB } from "./selfclaw.js";
 // indexer.ts is kept for reference but not used — DB is written directly after tx receipt
 import { handleTelegramUpdate, sendIntroMessage } from "./telegram.js";
 import { buildDatePaymentRequest } from "./x402.js";
@@ -53,6 +53,7 @@ import {
   dbGetContactReveal,
   dbUpsertContactReveal,
   dbCountCompletedDatesBetween,
+  supabase,
 } from "./db.js";
 import type { Address, Hash } from "viem";
 
@@ -126,10 +127,12 @@ app.post("/api/agents/register", async (req: Request, res: Response) => {
       void setOperatorKey(raw.wallet, agentWallet.address)
         .then(() => console.log(`[server] Operator key set: ${raw!.wallet} → ${agentWallet.address}`))
         .catch((e) => console.error("[server] setOperatorKey failed (non-fatal):", e.message));
-      // Fund in background — gas money, not critical for the response
-      void fundAgentWallet(agentWallet.address).catch((e) =>
-        console.error("[server] fundAgentWallet failed (non-fatal):", e.message)
-      );
+      // Fund first, then ERC-8004 registration needs the gas
+      try {
+        await fundAgentWallet(agentWallet.address);
+      } catch (e) {
+        console.error("[server] fundAgentWallet failed (non-fatal):", (e as Error).message);
+      }
     }
 
     // ── 3. ERC-8004 registration (best-effort, 10s timeout) ──────────────────
@@ -140,6 +143,7 @@ app.post("/api/agents/register", async (req: Request, res: Response) => {
         agentURI: raw.agentURI,
         personality: raw.personality,
         registeredAt: Number(raw.registeredAt),
+        agentPrivateKey: agentPrivateKey,
       }).catch((e) => {
         console.error("[server] ERC-8004 registration failed (non-fatal):", e.message);
         return existing?.erc8004_agent_id ? BigInt(existing.erc8004_agent_id) : raw!.erc8004AgentId;
@@ -227,12 +231,36 @@ app.post("/api/conversation/message", async (req: Request, res: Response) => {
 // ─── GET /api/conversation/live ───────────────────────────────────────────────
 // Returns the current in-progress conversation for a wallet (for live polling)
 
+// How long with no new messages before we consider a conversation stale/dead
+const CONVO_STALE_MS = 5 * 60 * 1000; // 5 minutes
+
 app.get("/api/conversation/live", async (req: Request, res: Response) => {
   try {
     const { wallet } = req.query as { wallet: string };
     if (!wallet) { res.status(400).json({ error: "wallet required" }); return; }
     const convo = await dbGetLiveConversation(wallet);
-    res.json(convo ?? null);
+    if (!convo) { res.json(null); return; }
+
+    const t = (convo.transcript as Record<string, unknown>) ?? {};
+    const msgs = (t.messages ?? []) as { timestamp?: number }[];
+    const lastMsgAt = msgs.length > 0 ? (msgs[msgs.length - 1].timestamp ?? 0) : 0;
+
+    // A non-passed conversation with no new message for CONVO_STALE_MS is zombie — auto-expire it
+    // so the matcher can restart it next cycle and the frontend stops showing "typing"
+    const isStale = !convo.passed && msgs.length > 0 && lastMsgAt > 0 && Date.now() - lastMsgAt > CONVO_STALE_MS;
+    if (isStale) {
+      console.warn(`[server] Stale conversation detected (last msg ${Math.round((Date.now() - lastMsgAt) / 60000)}m ago) — auto-expiring`);
+      await supabase.from("conversations").update({ passed: true }).eq("id", convo.id);
+    }
+
+    res.json({
+      ...convo,
+      passed: isStale ? true : convo.passed,
+      isStale,
+      lastMessageAt: lastMsgAt || null,
+      bookingError: (t.bookingError as string) ?? null,
+      bookingPending: (t.bookingPending as boolean) ?? (convo.passed && !t.bookingError),
+    });
   } catch (err) {
     res.status(500).json({ error: (err as Error).message });
   }
@@ -295,6 +323,7 @@ app.post("/api/conversation/start", async (req: Request, res: Response) => {
       preferences: a!.preferences,
       dealBreakers: a!.deal_breakers,
       billingMode: a!.billing_mode === 0 ? "SPLIT" : "SOLO",
+      avatarUri: a!.avatar_uri,
     });
 
     const result = await agentCall("/conversation", {
@@ -321,159 +350,162 @@ app.post("/api/conversation/start", async (req: Request, res: Response) => {
   }
 });
 
-// ─── POST /api/date/book ─────────────────────────────────────────────────────
+// ─── performDateBooking ───────────────────────────────────────────────────────
+// Shared logic called by both runMatchingCycle (auto) and the retry endpoint.
 
-app.post("/api/date/book", async (req: Request, res: Response) => {
+async function performDateBooking(
+  walletA: Address,
+  walletB: Address,
+  template: string,
+  sharedInterests: string[]
+): Promise<{ dateId: string; nftTokenId: string; metadataURI: string; imageUrl: string; tweetUrl: string | null }> {
+  const [agentA, agentB] = await Promise.all([dbGetAgent(walletA), dbGetAgent(walletB)]);
+  if (!agentA || !agentB) throw new Error("One or both agents not found in DB");
+
+  const toProfile = (a: typeof agentA) => ({
+    wallet: a!.wallet, name: a!.name, personality: a!.personality,
+    preferences: a!.preferences, dealBreakers: a!.deal_breakers,
+    billingMode: a!.billing_mode === 0 ? "SPLIT" : "SOLO",
+    avatarUri: a!.avatar_uri,
+  });
+
+  // 1. Resolve payer
+  let payerMode: string;
+  if (agentA.billing_mode === 0 && agentB.billing_mode === 0) payerMode = "SPLIT";
+  else if (agentA.billing_mode === 1 && agentB.billing_mode === 0) payerMode = "AGENT_A";
+  else if (agentA.billing_mode === 0 && agentB.billing_mode === 1) payerMode = "AGENT_B";
+  else {
+    const onChainPayer = await resolveNextPayer(walletA, walletB);
+    payerMode = onChainPayer.toLowerCase() === walletA.toLowerCase() ? "AGENT_A" : "AGENT_B";
+  }
+
+  // 2. Plan the date
+  let plan: Awaited<ReturnType<typeof agentCall>>;
   try {
-    const { walletA, walletB, template, sharedInterests } = req.body as {
-      walletA: Address;
-      walletB: Address;
-      template: string;
-      sharedInterests: string[];
-    };
-
-    const [agentA, agentB] = await Promise.all([
-      dbGetAgent(walletA),
-      dbGetAgent(walletB),
-    ]);
-
-    if (!agentA || !agentB) {
-      res.status(404).json({ error: "One or both agents not found in index" });
-      return;
-    }
-
-    const toProfile = (a: typeof agentA) => ({
-      wallet: a!.wallet,
-      name: a!.name,
-      personality: a!.personality,
-      preferences: a!.preferences,
-      dealBreakers: a!.deal_breakers,
-      billingMode: a!.billing_mode === 0 ? "SPLIT" : "SOLO",
-    });
-
-    // 1. Resolve payer FIRST (before planDate, which calls x402 internally)
-    // For dual-SOLO agents, on-chain rotation determines who pays this round.
-    let payerMode: string;
-    if (agentA.billing_mode === 0 && agentB.billing_mode === 0) {
-      payerMode = "SPLIT";
-    } else if (agentA.billing_mode === 1 && agentB.billing_mode === 0) {
-      payerMode = "AGENT_A";
-    } else if (agentA.billing_mode === 0 && agentB.billing_mode === 1) {
-      payerMode = "AGENT_B";
-    } else {
-      // Both SOLO — resolve rotation on-chain before triggering payment
-      const onChainPayer = await resolveNextPayer(walletA, walletB);
-      payerMode = onChainPayer.toLowerCase() === walletA.toLowerCase() ? "AGENT_A" : "AGENT_B";
-    }
-
-    // 2. Plan the date (image + IPFS, using resolved payerMode)
-    const plan = await agentCall("/plan-date", {
+    plan = await agentCall("/plan-date", {
       profileA: { ...toProfile(agentA), billingMode: payerMode === "AGENT_A" ? "SOLO" : agentA.billing_mode === 0 ? "SPLIT" : "SOLO" },
       profileB: { ...toProfile(agentB), billingMode: payerMode === "AGENT_B" ? "SOLO" : agentB.billing_mode === 0 ? "SPLIT" : "SOLO" },
       template,
       sharedInterests,
     });
+  } catch (e) {
+    throw new Error(`Date planning failed: ${(e as Error).message}`);
+  }
 
-    // ── Inline template/payer maps (match what the contract uses) ──────────────
-    const TEMPLATE_NUM: Record<string, number> = { COFFEE: 0, BEACH: 1, WORK: 2, ROOFTOP_DINNER: 3, GALLERY_WALK: 4 };
-    const PAYER_NUM: Record<string, number> = { AGENT_A: 0, AGENT_B: 1, SPLIT: 2 };
+  const TEMPLATE_NUM: Record<string, number> = { COFFEE: 0, BEACH: 1, WORK: 2, ROOFTOP_DINNER: 3, GALLERY_WALK: 4 };
+  const PAYER_NUM: Record<string, number> = { AGENT_A: 0, AGENT_B: 1, SPLIT: 2 };
 
-    // 3. Book on-chain — agent signs with its own wallet (not deployer).
-    const signerKey = (agentA.agent_private_key || undefined) as `0x${string}` | undefined;
-    const dateId = await bookDate({
-      agentA: walletA,
-      agentB: walletB,
-      template,
-      payerMode,
+  // 3. Book on-chain
+  const signerKey = (agentA.agent_private_key || undefined) as `0x${string}` | undefined;
+  let dateId: bigint;
+  try {
+    dateId = await bookDate({
+      agentA: walletA, agentB: walletB, template, payerMode,
       paymentToken: CUSD_ADDRESS,
-      payerA: walletA as Address,
-      payerB: walletB as Address,
+      payerA: walletA as Address, payerB: walletB as Address,
       agentPrivateKey: signerKey,
     });
+  } catch (e) {
+    throw new Error(`On-chain booking failed: ${(e as Error).message}`);
+  }
 
-    // 3b. Write to DB immediately — no need to wait for the indexer.
-    const scheduledAt = Math.floor(Date.now() / 1000);
-    await dbUpsertDate({
-      date_id: dateId.toString(),
-      agent_a: walletA.toLowerCase(),
-      agent_b: walletB.toLowerCase(),
-      template: TEMPLATE_NUM[template] ?? 0,
-      status: 1, // ACTIVE
-      payer_mode: PAYER_NUM[payerMode] ?? 2,
-      cost_usd: "0",
-      payment_token: CUSD_ADDRESS,
-      x402_tx_hash: "",
-      nft_token_id: null,
-      scheduled_at: scheduledAt,
-      completed_at: null,
-      metadata_uri: plan.metadataURI,
-      image_url: plan.imageUrl,
-      tweet_url: null,
-      indexed_at: new Date().toISOString(),
+  const scheduledAt = Math.floor(Date.now() / 1000);
+  await dbUpsertDate({
+    date_id: dateId.toString(), agent_a: walletA.toLowerCase(), agent_b: walletB.toLowerCase(),
+    template: TEMPLATE_NUM[template] ?? 0, status: 1, payer_mode: PAYER_NUM[payerMode] ?? 2,
+    cost_usd: "0", payment_token: CUSD_ADDRESS, x402_tx_hash: "", nft_token_id: null,
+    scheduled_at: scheduledAt, completed_at: null, metadata_uri: plan.metadataURI,
+    image_url: plan.imageUrl, tweet_url: null, indexed_at: new Date().toISOString(),
+  });
+  console.log(`[server] date #${dateId} written to DB (status: ACTIVE)`);
+
+  // 4. Mint NFT
+  let nftTokenId: bigint;
+  try {
+    nftTokenId = await mintNFT({
+      agentA: walletA, agentB: walletB, dateId,
+      metadataURI: plan.metadataURI, agentPrivateKey: signerKey,
     });
-    console.log(`[server] date #${dateId} written to DB (status: ACTIVE)`);
+  } catch (mintErr) {
+    console.error("[server] mintNFT failed — marking date cancelled", dateId.toString(), mintErr);
+    await dbUpdateDate(dateId.toString(), { status: 3 });
+    await completeDate(dateId, 0n).catch(() => {});
+    throw mintErr;
+  }
 
-    // 4. Mint NFT
-    let nftTokenId: bigint;
-    try {
-      nftTokenId = await mintNFT({
-        agentA: walletA,
-        agentB: walletB,
-        dateId,
-        metadataURI: plan.metadataURI,
-        agentPrivateKey: signerKey,
-      });
-    } catch (mintErr) {
-      console.error("[server] mintNFT failed — marking date cancelled", dateId.toString(), mintErr);
-      await dbUpdateDate(dateId.toString(), { status: 3 }); // CANCELLED in DB
-      await completeDate(dateId, 0n).catch(() => {});
-      throw mintErr;
+  // 5. Complete on-chain + DB
+  await completeDate(dateId, nftTokenId);
+  const completedAt = Math.floor(Date.now() / 1000);
+  await dbUpdateDate(dateId.toString(), {
+    status: 2, nft_token_id: nftTokenId.toString(), completed_at: completedAt,
+  });
+  console.log(`[server] date #${dateId} COMPLETED (nft: ${nftTokenId})`);
+
+  // 6. Telegram intro (non-fatal)
+  dbCountCompletedDatesBetween(walletA.toLowerCase(), walletB.toLowerCase())
+    .then(async (count) => {
+      if (count === 3) await sendIntroMessage(walletA.toLowerCase(), walletB.toLowerCase(), agentA.name, agentB.name).catch(() => {});
+    }).catch(() => {});
+
+  // 7. Tweet (non-fatal)
+  let tweetUrl: string | null = null;
+  try {
+    const tweet = await postDateTweet({ ipfsImageCID: plan.ipfsImageCID, caption: plan.tweetCaption });
+    tweetUrl = tweet.tweetUrl;
+    await dbUpdateDate(dateId.toString(), { tweet_url: tweetUrl });
+  } catch { /* non-fatal */ }
+
+  return { dateId: dateId.toString(), nftTokenId: nftTokenId.toString(), metadataURI: plan.metadataURI, imageUrl: plan.imageUrl, tweetUrl };
+}
+
+// ─── POST /api/date/book ─────────────────────────────────────────────────────
+// Kept for backwards compat but auto-booking now happens in runMatchingCycle.
+
+app.post("/api/date/book", async (req: Request, res: Response) => {
+  try {
+    const { walletA, walletB, template, sharedInterests } = req.body as {
+      walletA: Address; walletB: Address; template: string; sharedInterests: string[];
+    };
+    const result = await performDateBooking(walletA, walletB, template, sharedInterests ?? []);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: (err as Error).message });
+  }
+});
+
+// ─── POST /api/date/retry ─────────────────────────────────────────────────────
+// Re-attempts booking for a passed conversation that failed to auto-book.
+
+app.post("/api/date/retry", async (req: Request, res: Response) => {
+  try {
+    const { walletA, walletB } = req.body as { walletA: Address; walletB: Address };
+    const convo = await dbGetLiveConversation(walletA);
+    if (!convo || !convo.passed || !convo.template_suggested) {
+      res.status(400).json({ error: "No passed conversation found to retry booking for." });
+      return;
     }
+    // Clear any previous booking error from transcript
+    const transcript = (convo.transcript as Record<string, unknown>) ?? {};
+    await supabase.from("conversations").update({
+      transcript: { ...transcript, bookingError: null, bookingPending: true },
+    }).eq("id", convo.id);
 
-    // 5. Complete on-chain
-    await completeDate(dateId, nftTokenId);
-
-    // 5b. Write completed status to DB immediately
-    const completedAt = Math.floor(Date.now() / 1000);
-    await dbUpdateDate(dateId.toString(), {
-      status: 2, // COMPLETED
-      nft_token_id: nftTokenId.toString(),
-      completed_at: completedAt,
-    });
-    console.log(`[server] date #${dateId} written to DB (status: COMPLETED, nft: ${nftTokenId})`);
-
-    // 5c. Telegram intro if this is the 3rd completed date between the pair (non-fatal)
-    dbCountCompletedDatesBetween(walletA.toLowerCase(), walletB.toLowerCase())
-      .then(async (count) => {
-        if (count === 3) {
-          await sendIntroMessage(
-            walletA.toLowerCase(), walletB.toLowerCase(),
-            agentA.name, agentB.name,
-          ).catch((e) => console.error("[server] Telegram intro failed:", e.message));
-        }
+    // Run booking in background — don't block the HTTP response
+    performDateBooking(walletA, walletB, convo.template_suggested, convo.shared_interests ?? [])
+      .then(async () => {
+        await supabase.from("conversations").update({
+          transcript: { ...transcript, bookingError: null, bookingPending: false },
+        }).eq("id", convo.id);
       })
-      .catch(() => {});
-
-    // 6. Post tweet (non-fatal)
-    let tweetUrl: string | null = null;
-    try {
-      const tweet = await postDateTweet({
-        ipfsImageCID: plan.ipfsImageCID,
-        caption: plan.tweetCaption,
+      .catch(async (err) => {
+        const msg = (err as Error).message;
+        console.error("[server] Retry booking failed:", msg);
+        await supabase.from("conversations").update({
+          transcript: { ...transcript, bookingError: msg, bookingPending: false },
+        }).eq("id", convo.id);
       });
-      tweetUrl = tweet.tweetUrl;
-      await dbUpdateDate(dateId.toString(), { tweet_url: tweetUrl });
-    } catch (tweetErr) {
-      console.error("[server] Twitter post failed (non-fatal):", tweetErr);
-    }
 
-    res.json({
-      dateId: dateId.toString(),
-      nftTokenId: nftTokenId.toString(),
-      metadataURI: plan.metadataURI,
-      imageUrl: plan.imageUrl,
-      tweetUrl,
-    });
+    res.json({ ok: true, message: "Booking retry started" });
   } catch (err) {
     res.status(500).json({ error: (err as Error).message });
   }
@@ -532,11 +564,16 @@ app.get("/api/agents/pool-status", async (_req: Request, res: Response) => {
       busyWallets.add(c.wallet_b);
     }
 
+    // Total completed dates (all-time) — used to show activity even when no active dates
+    const { count: totalDates } = await db
+      .from("dates").select("*", { count: "exact", head: true }).eq("status", 2);
+
     const total = agents.length;
+    const verified = agents.filter(a => a.selfclaw_verified).length;
     const busy = agents.filter(a => busyWallets.has(a.wallet)).length;
     const available = total - busy;
 
-    res.json({ total, busy, available, busyWallets: [...busyWallets] });
+    res.json({ total, verified, busy, available, totalDates: totalDates ?? 0, busyWallets: [...busyWallets] });
   } catch (err) {
     res.status(500).json({ error: (err as Error).message });
   }
@@ -557,19 +594,66 @@ app.get("/api/agents/:wallet", async (req: Request, res: Response) => {
   }
 });
 
+// ─── POST /api/agents/:wallet/register-identity ──────────────────────────────
+// Retries ERC-8004 registration if the initial attempt failed (id is "0" or missing)
+
+app.post("/api/agents/:wallet/register-identity", async (req: Request, res: Response) => {
+  try {
+    const agent = await dbGetAgent(req.params.wallet);
+    if (!agent) { res.status(404).json({ error: "Agent not found — register your agent first." }); return; }
+
+    if (agent.erc8004_agent_id && agent.erc8004_agent_id !== "0") {
+      res.json({ ok: true, erc8004AgentId: agent.erc8004_agent_id, alreadyRegistered: true });
+      return;
+    }
+
+    if (!agent.agent_private_key) {
+      res.status(400).json({ error: "Agent private key not found — cannot register identity." });
+      return;
+    }
+
+    // Fund the agent wallet if it has no gas (happens when initial funding tx
+    // hadn't confirmed yet at the time the first ERC-8004 attempt ran)
+    const agentAddress = (await import("viem/accounts"))
+      .privateKeyToAccount(agent.agent_private_key as `0x${string}`).address;
+    const { createPublicClient: mkClient, http: mkHttp } = await import("viem");
+    const IS_MAINNET_HERE = process.env.NETWORK === "mainnet";
+    const { celo: celoChain, celoAlfajores: celoAlfajoresChain } = await import("viem/chains");
+    const checkClient = mkClient({
+      chain: IS_MAINNET_HERE ? celoChain : celoAlfajoresChain,
+      transport: mkHttp(IS_MAINNET_HERE ? process.env.CELO_RPC_URL : process.env.CELO_SEPOLIA_RPC_URL),
+    });
+    const balance = await checkClient.getBalance({ address: agentAddress });
+    const MIN_GAS_BALANCE = BigInt("80000000000000000"); // 0.08 CELO — enough for ERC-8004 + headroom
+    if (balance < MIN_GAS_BALANCE) {
+      console.log(`[server] Agent wallet ${agentAddress} balance ${balance} < 0.08 CELO — topping up…`);
+      await fundAgentWallet(agentAddress);
+      console.log(`[server] Agent wallet topped up to 0.1 CELO`);
+    }
+
+    const agentId = await registerERC8004Agent({
+      wallet: agent.wallet,
+      name: agent.name,
+      agentURI: `https://lemon.dating/agents/${agent.wallet}`,
+      personality: agent.personality,
+      registeredAt: Date.now(),
+      agentPrivateKey: agent.agent_private_key,
+    });
+
+    await dbUpsertAgent({ ...agent, erc8004_agent_id: agentId.toString() });
+    res.json({ ok: true, erc8004AgentId: agentId.toString() });
+  } catch (err) {
+    res.status(500).json({ error: (err as Error).message });
+  }
+});
+
 // ─── GET /api/agents/:wallet/selfclaw ────────────────────────────────────────
 
 app.get("/api/agents/:wallet/selfclaw", async (req: Request, res: Response) => {
   try {
     const agent = await dbGetAgent(req.params.wallet);
     if (!agent) { res.status(404).json({ error: "Agent not found" }); return; }
-    // Quick on-chain check — sync DB if now verified
-    const status = await checkSelfStatus(agent.wallet as Address);
-    if (status.verified && !agent.selfclaw_verified) {
-      await dbUpsertAgent({ ...agent, selfclaw_verified: true, selfclaw_human_id: status.humanId ?? "" })
-        .catch(() => {});
-    }
-    res.json(status);
+    res.json({ verified: agent.selfclaw_verified ?? false, humanId: agent.selfclaw_human_id ?? null });
   } catch (err) {
     res.status(500).json({ error: (err as Error).message });
   }
@@ -587,22 +671,24 @@ app.post("/api/agents/:wallet/selfclaw/retry", async (req: Request, res: Respons
       res.json({ ok: true, verified: true, humanId: agent.selfclaw_human_id }); return;
     }
 
-    // Start session — returns immediately with QR code data URL
-    const session = await startSelfSession({
-      wallet: agent.wallet as Address,
-      agentName: agent.name,
-      agentDescription: agent.personality,
-    });
-
-    if (!session) {
-      res.json({ ok: true, verified: false, started: false, qrData: null }); return;
+    // Start session with Self Agent ID API
+    let session;
+    try {
+      session = await startSelfSession({
+        wallet: agent.wallet as Address,
+        agentName: agent.name,
+        agentDescription: agent.personality,
+      });
+    } catch (sessionErr) {
+      const msg = (sessionErr as Error).message;
+      console.error("[server] startSelfSession failed:", msg);
+      res.status(500).json({ error: msg }); return;
     }
 
-    // Persist session token so we can reference it later
+    // Persist session token
     await dbUpsertAgent({
       ...agent,
       selfclaw_session_id: session.sessionToken,
-      selfclaw_public_key: session.agentAddress ?? agent.selfclaw_public_key,
       indexed_at: new Date().toISOString(),
     });
 
@@ -613,11 +699,12 @@ app.post("/api/agents/:wallet/selfclaw/retry", async (req: Request, res: Respons
       agent.name,
       agent.personality,
       async (humanId) => {
-        await dbUpsertAgent({ ...agent, selfclaw_verified: true, selfclaw_human_id: humanId, indexed_at: new Date().toISOString() });
+        const fresh = await dbGetAgent(agent.wallet);
+        if (fresh) await dbUpsertAgent({ ...fresh, selfclaw_verified: true, selfclaw_human_id: humanId, indexed_at: new Date().toISOString() });
       }
     ).catch((e) => console.error("[server] pollAndUpdateDB failed:", e));
 
-    console.log(`[self] Session started for ${agent.wallet}, deepLink=${session.deepLink.slice(0, 60)}…`);
+    console.log(`[self-agent-id] Session started for ${agent.wallet}, deepLink=${session.deepLink.slice(0, 60)}…`);
     res.json({ ok: true, verified: false, started: true, qrData: session.qrDataUrl, deepLink: session.deepLink });
   } catch (err) {
     res.status(500).json({ error: (err as Error).message });
@@ -633,6 +720,42 @@ app.get("/api/leaderboard", async (_req: Request, res: Response) => {
     res.status(500).json({ error: (err as Error).message });
   }
 });
+
+// ─── Zombie conversation cleanup ─────────────────────────────────────────────
+// Runs every 5 minutes. Any conversation with passed=false and whose last
+// transcript message is older than CONVO_STALE_MS is expired so that:
+//   - the frontend stops showing the typing indicator
+//   - the matcher can re-queue the pair next cycle
+
+async function cleanupZombieConversations() {
+  try {
+    const { data: stuck } = await supabase
+      .from("conversations")
+      .select("id, transcript")
+      .eq("passed", false);
+
+    if (!stuck?.length) return;
+
+    const staleIds: number[] = [];
+    for (const row of stuck) {
+      const msgs = ((row.transcript as Record<string,unknown>)?.messages ?? []) as { timestamp?: number }[];
+      if (msgs.length === 0) continue; // hasn't started yet — leave it
+      const lastTs = msgs[msgs.length - 1]?.timestamp ?? 0;
+      if (lastTs > 0 && Date.now() - lastTs > CONVO_STALE_MS) {
+        staleIds.push(row.id as number);
+      }
+    }
+
+    if (staleIds.length > 0) {
+      await supabase.from("conversations").update({ passed: true }).in("id", staleIds);
+      console.log(`[cleanup] Expired ${staleIds.length} zombie conversation(s)`);
+    }
+  } catch (e) {
+    console.error("[cleanup] Zombie cleanup error:", (e as Error).message);
+  }
+}
+
+setInterval(cleanupZombieConversations, 5 * 60 * 1000);
 
 // ─── Matching scheduler ───────────────────────────────────────────────────────
 // Runs a matching attempt every MATCH_INTERVAL_MS. Skips if fewer than 2 agents
@@ -658,6 +781,7 @@ async function runMatchingCycle() {
       preferences: a.preferences,
       dealBreakers: a.deal_breakers,
       billingMode: a.billing_mode === 0 ? "SPLIT" : "SOLO",
+      avatarUri: a.avatar_uri,
     }));
 
     const { matches } = await agentCall("/match", { agents: profiles });
@@ -699,9 +823,15 @@ async function runMatchingCycle() {
     if (top) {
       console.log(`[matcher] Starting conversation: ${top.agentA} ↔ ${top.agentB}`);
       try {
+        const profileA = profiles.find((p) => p.wallet.toLowerCase() === top.agentA.toLowerCase());
+        const profileB = profiles.find((p) => p.wallet.toLowerCase() === top.agentB.toLowerCase());
+        if (!profileA || !profileB) {
+          console.error(`[matcher] Profile lookup failed — agentA=${top.agentA}, agentB=${top.agentB}`);
+          return;
+        }
         const convo = await agentCall("/conversation", {
-          profileA: profiles.find((p) => p.wallet === top.agentA),
-          profileB: profiles.find((p) => p.wallet === top.agentB),
+          profileA,
+          profileB,
           simulate: true,
           callbackUrl: `${process.env.SERVER_URL ?? `http://localhost:${PORT}`}/api/conversation/message`,
         }) as { passed: boolean; suggestedDateTemplate?: string; sharedInterests?: string[] };
@@ -718,7 +848,29 @@ async function runMatchingCycle() {
         );
 
         if (convo.passed) {
-          console.log(`[matcher] ✓ Conversation passed — template: ${convo.suggestedDateTemplate}. Awaiting human approval.`);
+          const template = convo.suggestedDateTemplate ?? "COFFEE";
+          console.log(`[matcher] ✓ Conversation passed — auto-booking date (template: ${template})…`);
+
+          // Auto-book — no user action needed. Store error in transcript if it fails.
+          performDateBooking(
+            top.agentA as Address,
+            top.agentB as Address,
+            template,
+            top.sharedInterests ?? []
+          ).then(() => {
+            console.log(`[matcher] ✓ Auto-booking complete for ${top.agentA.slice(0, 8)}↔${top.agentB.slice(0, 8)}`);
+          }).catch(async (bookErr) => {
+            const msg = (bookErr as Error).message;
+            console.error("[matcher] Auto-booking failed (user can retry):", msg);
+            // Store error in transcript so frontend can show retry button
+            const row = await dbGetLiveConversation(top.agentA);
+            if (row) {
+              const existing = (row.transcript as Record<string, unknown>) ?? {};
+              await supabase.from("conversations").update({
+                transcript: { ...existing, bookingError: msg, bookingPending: false },
+              }).eq("id", row.id);
+            }
+          });
         } else {
           console.log("[matcher] Conversation did not pass — no date proposed.");
         }

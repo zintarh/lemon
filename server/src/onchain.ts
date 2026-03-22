@@ -350,11 +350,11 @@ export async function getAgentProfile(wallet: Address): Promise<AgentProfile> {
  * Amount: 0.05 CELO — enough for ~100 transactions at normal gas prices.
  */
 export async function fundAgentWallet(agentWalletAddress: Address): Promise<void> {
-  const DRIP_AMOUNT = BigInt("50000000000000000"); // 0.05 CELO in wei
+  const DRIP_AMOUNT = BigInt("100000000000000000"); // 0.1 CELO in wei
   const hash = await walletClient.sendTransaction({
     to: agentWalletAddress,
     value: DRIP_AMOUNT,
   });
   await publicClient.waitForTransactionReceipt({ hash });
-  console.log(`[onchain] Funded agent wallet ${agentWalletAddress} with 0.05 CELO`);
+  console.log(`[onchain] Funded agent wallet ${agentWalletAddress} with 0.1 CELO`);
 }

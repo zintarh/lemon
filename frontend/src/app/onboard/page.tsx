@@ -5,7 +5,7 @@ import { toast } from "sonner";
 import { usePrivy } from "@privy-io/react-auth";
 import { useAccount, usePublicClient } from "wagmi";
 import { useWriteContract, useWaitForTransactionReceipt } from "wagmi";
-import { maxUint256 } from "viem";
+import { parseUnits } from "viem";
 import { ConnectButton } from "@/components/ConnectButton";
 import { useRegisterAgent, type BillingMode } from "@/hooks/useRegisterAgent";
 import { parseError } from "@/lib/errors";
@@ -220,12 +220,17 @@ export default function OnboardPage() {
   const { writeContract: writeApprove, data: approveHash, isPending: isApprovePending } = useWriteContract();
   const { isLoading: isApproveConfirming, isSuccess: isApproveSuccess } = useWaitForTransactionReceipt({ hash: approveHash });
 
+  // Spending cap — user picks how much cUSD their agent can spend (default $20)
+  const SPEND_PRESETS = [5, 10, 20, 50] as const;
+  const [spendLimit, setSpendLimit] = useState<number>(20);
+
   function handleApprove() {
+    // cUSD has 18 decimals on Celo
     writeApprove({
       address: CUSD_ADDRESS,
       abi: erc20Abi,
       functionName: "approve",
-      args: [LEMON_DATE_ADDRESS, maxUint256],
+      args: [LEMON_DATE_ADDRESS, parseUnits(spendLimit.toString(), 18)],
     });
   }
 
@@ -457,19 +462,42 @@ export default function OnboardPage() {
 
           {/* Approve step — auto-navigates to dashboard on confirm */}
           <div className="rounded-2xl bg-[#D6820A]/[0.06] border border-[#D6820A]/20 p-[clamp(14px,2vh,20px)] mb-[clamp(14px,2vh,20px)] text-left">
-            <p className="font-bold text-[clamp(11px,1.4vh,13px)] text-[#92400e] mb-1.5">
-              One last step — approve cUSD spending
+            <p className="font-bold text-[clamp(11px,1.4vh,13px)] text-[#92400e] mb-1">
+              One last step — set your agent&apos;s spending limit
             </p>
-            <p className="text-[clamp(11px,1.3vh,12.5px)] text-[#1a1206]/50 leading-[1.55] mb-3">
-              Your agent&apos;s wallet will pay for dates directly from your cUSD balance. One-time approval — revoke anytime.
+            <p className="text-[clamp(10px,1.2vh,12px)] text-[#1a1206]/45 leading-[1.5] mb-3">
+              Choose how much cUSD your agent can spend on dates. You keep full control — increase or revoke anytime.
             </p>
+
+            {/* Preset buttons */}
+            <div className="flex gap-2 mb-3">
+              {SPEND_PRESETS.map(amt => (
+                <button
+                  key={amt}
+                  onClick={() => setSpendLimit(amt)}
+                  className="flex-1 rounded-xl border py-1.5 text-[12px] font-bold transition-colors cursor-pointer"
+                  style={{
+                    background: spendLimit === amt ? "#D6820A" : "white",
+                    color: spendLimit === amt ? "white" : "#92400e",
+                    borderColor: spendLimit === amt ? "#D6820A" : "rgba(214,130,10,0.3)",
+                  }}
+                >
+                  ${amt}
+                </button>
+              ))}
+            </div>
+
+            <p className="text-[11px] text-[#1a1206]/40 mb-3 text-center">
+              Approving <span className="font-semibold text-[#92400e]">${spendLimit} cUSD</span> — your wallet stays yours
+            </p>
+
             <button
               className="btn btn-primary w-full text-[clamp(12px,1.5vh,14px)]"
               style={{ opacity: isApprovePending || isApproveConfirming ? 0.55 : 1, cursor: isApprovePending || isApproveConfirming ? "not-allowed" : "pointer" }}
               disabled={isApprovePending || isApproveConfirming}
               onClick={handleApprove}
             >
-              {isApprovePending ? "Confirm in wallet…" : isApproveConfirming ? "Activated — entering the pool…" : "Activate & enter the pool →"}
+              {isApprovePending ? "Confirm in wallet…" : isApproveConfirming ? "Activated — entering the pool…" : `Approve $${spendLimit} & enter the pool →`}
             </button>
           </div>
 

@@ -16,7 +16,7 @@ const STEPS = [
   {
     n: "03",
     title: "Sealed on-chain",
-    body: "Payment via x402, a memory NFT minted, match posted to @LemonDates.",
+    body: "Payment via x402, a memory NFT minted, match posted to @lemon_ochain.",
     icon: "⛓️",
   },
 ];
@@ -103,7 +103,7 @@ export default function HowItWorksPage() {
           <div className="flex gap-5 text-[14px] text-[rgba(26,18,6,0.35)]">
             <Link href="/gallery" className="text-inherit no-underline">Gallery</Link>
             <Link href="/leaderboard" className="text-inherit no-underline">Rankings</Link>
-            <a href="https://twitter.com/LemonDates" target="_blank" rel="noopener noreferrer" className="text-inherit no-underline">@LemonDates</a>
+            <a href="https://twitter.com/lemon_ochain" target="_blank" rel="noopener noreferrer" className="text-inherit no-underline">@lemon_ochain</a>
           </div>
         </div>
       </footer>

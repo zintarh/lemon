@@ -5,11 +5,14 @@ import axios from "axios";
 import Link from "next/link";
 import { Heart, Image, Users, Zap, Trophy, CalendarDays, DollarSign } from "lucide-react";
 import { ConnectButton } from "@/components/ConnectButton";
+import { avatarUriToDisplayUrl } from "@/lib/avatarUri";
 
 interface LeaderboardEntry {
   wallet: string;
   name: string;
+  avatarUri?: string;
   erc8004AgentId: string;
+  selfclawVerified: boolean;
   datesCompleted: number;
   nftCount: number;
   uniquePartners: number;
@@ -57,16 +60,12 @@ export default function LeaderboardPage() {
   const [entries, setEntries] = useState<LeaderboardEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [sort, setSort] = useState<SortKey>("zestScore");
-  const [busyWallets, setBusyWallets] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     axios.get(`${API}/api/leaderboard`)
       .then((r) => setEntries(r.data.leaderboard ?? []))
       .catch(() => {})
       .finally(() => setLoading(false));
-    axios.get(`${API}/api/agents/pool-status`)
-      .then((r) => setBusyWallets(new Set((r.data.busyWallets ?? []) as string[])))
-      .catch(() => {});
   }, []);
 
   const sorted   = [...entries].sort((a, b) => getScore(b, sort) - getScore(a, sort));
@@ -151,8 +150,7 @@ export default function LeaderboardPage() {
               const pct     = maxScore > 0 ? (score / maxScore) * 100 : 0;
               const initial = entry.name?.slice(0, 1).toUpperCase() || "?";
               const rankColor = RANK_COLORS[i] ?? "var(--text-faint)";
-
-              const isBusy = busyWallets.has(entry.wallet.toLowerCase());
+              const avatarUrl = avatarUriToDisplayUrl(entry.avatarUri);
 
               return (
                 <div
@@ -179,8 +177,14 @@ export default function LeaderboardPage() {
                     fontSize: 14, fontWeight: 800,
                     color: rank <= 3 ? rankColor : "var(--text-muted)",
                     fontFamily: "'Syne', sans-serif",
+                    overflow: "hidden",
                   }}>
-                    {initial}
+                    {avatarUrl ? (
+                      /* eslint-disable-next-line @next/next/no-img-element */
+                      <img src={avatarUrl} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                    ) : (
+                      initial
+                    )}
                   </div>
 
                   {/* Info */}
@@ -192,16 +196,17 @@ export default function LeaderboardPage() {
                       <span style={{ fontSize: 11, color: "var(--text-faint)", fontFamily: "monospace", flexShrink: 0 }}>
                         {entry.wallet.slice(0, 6)}…{entry.wallet.slice(-4)}
                       </span>
-                      {/* Status tag */}
-                      <span style={{
-                        fontSize: 10, fontWeight: 700, letterSpacing: "0.04em",
-                        padding: "2px 7px", borderRadius: 100, flexShrink: 0,
-                        background: isBusy ? "rgba(245,200,66,0.15)" : "rgba(34,197,94,0.1)",
-                        color: isBusy ? "#b8690a" : "#16a34a",
-                        border: `1px solid ${isBusy ? "rgba(245,200,66,0.3)" : "rgba(34,197,94,0.2)"}`,
-                      }}>
-                        {isBusy ? "💛 On a date" : "🟢 Available"}
-                      </span>
+                      {entry.erc8004AgentId && (
+                        <span style={{
+                          fontSize: 10, fontWeight: 700, letterSpacing: "0.04em",
+                          padding: "2px 7px", borderRadius: 100, flexShrink: 0,
+                          background: "rgba(16,185,129,0.1)",
+                          color: "#059669",
+                          border: "1px solid rgba(16,185,129,0.25)",
+                        }}>
+                          ✓ Identity
+                        </span>
+                      )}
                     </div>
 
                     {/* Progress bar */}

@@ -1,6 +1,7 @@
 "use client";
 
 import { useRef, useState, useEffect, useCallback } from "react";
+import { createPortal } from "react-dom";
 import { usePrivy } from "@privy-io/react-auth";
 import { useAccount, useBalance } from "wagmi";
 import { formatUnits } from "viem";
@@ -138,6 +139,91 @@ function useSelfClawVerify(address: string | undefined) {
   return { state, humanId, qrData, deepLink, startVerify };
 }
 
+// ─── Verify Modal ─────────────────────────────────────────────────────────────
+
+function VerifyModal({
+  qrData,
+  deepLink,
+  onClose,
+}: {
+  qrData: string | null;
+  deepLink: string | null;
+  onClose: () => void;
+}) {
+  // Close on Escape
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) { if (e.key === "Escape") onClose(); }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  return createPortal(
+    <div
+      className="fixed inset-0 z-[200] flex items-center justify-center p-4"
+      style={{ background: "rgba(0,0,0,0.55)", backdropFilter: "blur(4px)" }}
+      onClick={e => { if (e.target === e.currentTarget) onClose(); }}
+    >
+      <div className="relative bg-white rounded-3xl shadow-2xl p-6 flex flex-col items-center gap-4 w-full max-w-sm">
+        {/* Close */}
+        <button
+          onClick={onClose}
+          className="absolute top-4 right-4 text-gray-400 hover:text-gray-700 transition-colors"
+          aria-label="Close"
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+            <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+          </svg>
+        </button>
+
+        {/* Title */}
+        <div className="text-center">
+          <p className="text-base font-bold text-[#1a1206]">Verify you&apos;re human</p>
+          <p className="text-[12px] text-gray-500 mt-0.5">Use the Self app to scan the QR code below</p>
+        </div>
+
+        {/* QR */}
+        {qrData ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            src={qrData}
+            alt="Self verification QR"
+            className="w-64 h-64 rounded-2xl border border-gray-200"
+          />
+        ) : (
+          <div className="w-64 h-64 rounded-2xl border border-gray-200 flex items-center justify-center">
+            <span className="w-6 h-6 rounded-full border-2 border-[#D6820A] border-t-transparent animate-spin" />
+          </div>
+        )}
+
+        {/* Instructions */}
+        <div className="w-full rounded-xl bg-amber-50 border border-amber-200 px-4 py-3 text-center">
+          <p className="text-[12px] font-bold text-amber-800">Open the Self app → tap Scan</p>
+          <p className="text-[11px] text-amber-600 mt-0.5">Point the scanner at this QR code to verify your identity</p>
+        </div>
+
+        {/* Deep link fallback */}
+        {deepLink && (
+          <a
+            href={deepLink}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="w-full text-center text-[12px] font-semibold text-[#D6820A] hover:text-[#92400e] no-underline bg-[#D6820A]/08 border border-[#D6820A]/25 rounded-xl py-2.5 px-3 transition-colors"
+          >
+            Or open the Self app directly →
+          </a>
+        )}
+
+        {/* Polling indicator */}
+        <div className="flex items-center gap-2 text-[11px] text-gray-400">
+          <span className="w-2 h-2 rounded-full border-2 border-gray-400 border-t-transparent animate-spin" />
+          Waiting for verification…
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
 // ─── ConnectButton ────────────────────────────────────────────────────────────
 
 export function ConnectButton() {
@@ -147,6 +233,17 @@ export function ConnectButton() {
   const ref = useRef<HTMLDivElement>(null);
 
   const { state: verifyState, humanId, qrData, deepLink, startVerify } = useSelfClawVerify(address);
+  const [verifyModalOpen, setVerifyModalOpen] = useState(false);
+
+  // Auto-open modal when polling starts (QR is ready)
+  useEffect(() => {
+    if (verifyState === "polling" && qrData) setVerifyModalOpen(true);
+  }, [verifyState, qrData]);
+
+  // Close modal once verified
+  useEffect(() => {
+    if (verifyState === "verified") setVerifyModalOpen(false);
+  }, [verifyState]);
 
   useEffect(() => {
     function handler(e: MouseEvent) {
@@ -186,6 +283,14 @@ export function ConnectButton() {
   const isVerified = verifyState === "verified";
 
   return (
+    <>
+    {verifyModalOpen && (
+      <VerifyModal
+        qrData={qrData}
+        deepLink={deepLink}
+        onClose={() => setVerifyModalOpen(false)}
+      />
+    )}
     <div ref={ref} className="relative flex items-center gap-2">
       {/* Verified badge shown next to the button when verified */}
       {isVerified && (
@@ -238,25 +343,28 @@ export function ConnectButton() {
             </div>
           ) : (
             <button
-              onClick={startVerify}
-              disabled={verifyState === "loading" || verifyState === "polling" || verifyState === "unavailable"}
+              onClick={() => {
+                if (verifyState === "polling") { setVerifyModalOpen(true); return; }
+                startVerify();
+              }}
+              disabled={verifyState === "loading" || verifyState === "unavailable"}
               className="w-full mb-2 flex items-center justify-between gap-2 py-1.5 px-2 rounded-lg border text-xs font-semibold transition-colors"
               style={{
                 borderColor: verifyState === "failed" ? "#fca5a5" : verifyState === "unavailable" ? "#d1d5db" : "#D6820A40",
                 color: verifyState === "failed" ? "#dc2626" : verifyState === "unavailable" ? "#9ca3af" : "#92400e",
                 background: verifyState === "failed" ? "#fef2f2" : verifyState === "unavailable" ? "#f9fafb" : "#D6820A08",
-                opacity: verifyState === "loading" || verifyState === "polling" || verifyState === "unavailable" ? 0.7 : 1,
-                cursor: verifyState === "loading" || verifyState === "polling" || verifyState === "unavailable" ? "default" : "pointer",
+                opacity: verifyState === "loading" || verifyState === "unavailable" ? 0.7 : 1,
+                cursor: verifyState === "loading" || verifyState === "unavailable" ? "default" : "pointer",
               }}
             >
               <span>
                 {verifyState === "loading"     ? "Starting…" :
-                 verifyState === "polling"     ? "Verifying…" :
+                 verifyState === "polling"     ? "Show QR code" :
                  verifyState === "failed"      ? "Retry verify" :
                  verifyState === "unavailable" ? "Verification unavailable" :
                  "Verify as human"}
               </span>
-              {verifyState === "polling" ? (
+              {verifyState === "loading" ? (
                 <span className="w-3 h-3 rounded-full border-2 border-[#D6820A] border-t-transparent animate-spin" />
               ) : (
                 <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -264,34 +372,6 @@ export function ConnectButton() {
                 </svg>
               )}
             </button>
-          )}
-
-          {verifyState === "polling" && (
-            <div className="mb-2 flex flex-col items-center gap-1.5">
-              {qrData ? (
-                <>
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img src={qrData} alt="Self verification QR" className="w-36 h-36 rounded-lg border border-gray-200" />
-                  <p className="text-[10px] text-gray-500 text-center leading-tight font-medium">
-                    Scan with the Self app
-                  </p>
-                </>
-              ) : (
-                <p className="text-[10px] text-gray-400 leading-tight text-center">
-                  Waiting for verification…
-                </p>
-              )}
-              {deepLink && (
-                <a
-                  href={deepLink}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="w-full text-center text-[10px] font-semibold text-[#D6820A] hover:text-[#92400e] no-underline bg-[#D6820A]/08 border border-[#D6820A]/25 rounded-lg py-1.5 px-2 transition-colors"
-                >
-                  Open in Self app →
-                </a>
-              )}
-            </div>
           )}
 
           {/* Settings link */}
@@ -316,5 +396,6 @@ export function ConnectButton() {
         </div>
       )}
     </div>
+    </>
   );
 }

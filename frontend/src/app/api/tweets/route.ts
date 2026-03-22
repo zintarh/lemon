@@ -1,7 +1,10 @@
 import { NextResponse } from "next/server";
 
+export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
+
 const TWITTER_BEARER_TOKEN = process.env.TWITTER_BEARER_TOKEN;
-const LEMON_TWITTER_USERNAME = "LemonDates";
+const LEMON_TWITTER_USERNAME = "lemon_ochain";
 const MAX_RESULTS = 20;
 
 export interface Tweet {
@@ -18,17 +21,22 @@ export async function GET() {
   }
 
   try {
-    // 1. Resolve user ID for @LemonDates
+    // 1. Resolve user ID for @lemon_ochain
     const userRes = await fetch(
       `https://api.twitter.com/2/users/by/username/${LEMON_TWITTER_USERNAME}`,
       { headers: { Authorization: `Bearer ${TWITTER_BEARER_TOKEN}` } }
     );
     if (!userRes.ok) {
-      throw new Error(`Twitter user lookup failed: ${userRes.status}`);
+      return NextResponse.json(
+        { tweets: [], error: `Twitter user lookup failed: ${userRes.status}` },
+        { status: 200 }
+      );
     }
     const userData = await userRes.json();
     const userId = userData?.data?.id;
-    if (!userId) throw new Error("Could not find @LemonDates user ID");
+    if (!userId) {
+      return NextResponse.json({ tweets: [], error: "Could not find @lemon_ochain user ID" }, { status: 200 });
+    }
 
     // 2. Fetch recent tweets with media expansions
     const timelineRes = await fetch(
@@ -40,7 +48,10 @@ export async function GET() {
       { headers: { Authorization: `Bearer ${TWITTER_BEARER_TOKEN}` }, next: { revalidate: 300 } }
     );
     if (!timelineRes.ok) {
-      throw new Error(`Twitter timeline failed: ${timelineRes.status}`);
+      return NextResponse.json(
+        { tweets: [], error: `Twitter timeline failed: ${timelineRes.status}` },
+        { status: 200 }
+      );
     }
     const timelineData = await timelineRes.json();
 

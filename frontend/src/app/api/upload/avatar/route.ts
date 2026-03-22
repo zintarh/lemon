@@ -8,6 +8,9 @@
 
 import { NextRequest, NextResponse } from "next/server";
 
+export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
+
 export async function POST(req: NextRequest) {
   const apiKey = process.env.PINATA_API_KEY;
   const secretKey = process.env.PINATA_SECRET_KEY;

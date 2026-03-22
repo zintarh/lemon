@@ -165,7 +165,9 @@ export async function dbUpdateDate(dateId: string, patch: Partial<DateRow>): Pro
 export type LeaderboardEntry = {
   wallet: string;
   name: string;
+  avatarUri: string;
   erc8004AgentId: string;
+  selfclawVerified: boolean;
   datesCompleted: number;
   nftCount: number;
   uniquePartners: number;
@@ -192,7 +194,7 @@ export async function dbGetLeaderboard(): Promise<LeaderboardEntry[]> {
   // 3. Fetch agents
   const { data: agents, error: agentsErr } = await supabase
     .from("agents")
-    .select("wallet, name, erc8004_agent_id")
+    .select("wallet, name, avatar_uri, erc8004_agent_id, selfclaw_verified")
     .eq("active", true);
   if (agentsErr) throw new Error(`[db] getLeaderboard agents: ${agentsErr.message}`);
 
@@ -237,7 +239,9 @@ export async function dbGetLeaderboard(): Promise<LeaderboardEntry[]> {
     return {
       wallet: a.wallet,
       name: a.name,
+      avatarUri: a.avatar_uri ?? "",
       erc8004AgentId: a.erc8004_agent_id,
+      selfclawVerified: a.selfclaw_verified ?? false,
       datesCompleted: s.dates,
       nftCount: s.nftCount,
       uniquePartners,
@@ -300,14 +304,17 @@ export async function dbUpsertContactReveal(row: Omit<ContactRevealRow, "updated
   if (error) throw new Error(`[db] upsertContactReveal: ${error.message}`);
 }
 
-/** Returns true if a pending (0) or active (1) date already exists between two agents. */
+/** Returns true if a pending (0) or active (1) date already exists between two agents,
+ *  started within the last 2 hours. Older stuck dates are treated as expired. */
 export async function dbHasActiveDateBetween(walletA: string, walletB: string): Promise<boolean> {
   const a = walletA.toLowerCase();
   const b = walletB.toLowerCase();
+  const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
   const { count } = await supabase
     .from("dates")
     .select("*", { count: "exact", head: true })
     .in("status", [0, 1])
+    .gte("created_at", twoHoursAgo)
     .or(
       `and(agent_a.eq.${a},agent_b.eq.${b}),and(agent_a.eq.${b},agent_b.eq.${a})`
     );

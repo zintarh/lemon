@@ -1,15 +1,4 @@
-/**
- * erc8004.ts (agent layer)
- *
- * Registers a Lemon agent in the ERC-8004 Agent Trust Protocol identity
- * registry (ChaosChain). Called from:
- *   1. POST /register-agent  — after the user's on-chain registration completes
- *   2. (optionally) after each successful date, to update the agent's
- *      reputation score on the registry
- *
- * When CHAOSCHAIN_API_KEY is not set (dev / test), registration is skipped
- * and agentId 0 is returned — the agent still works normally without it.
- */
+
 
 import axios from "axios";
 import type { AgentProfile } from "./matchingEngine.js";
@@ -29,12 +18,7 @@ export interface ReputationUpdate {
   success: boolean;
 }
 
-// ─── Registration ─────────────────────────────────────────────────────────────
 
-/**
- * Registers a new agent profile in the ERC-8004 identity registry.
- * Non-fatal: logs the error and returns agentId=0 on failure.
- */
 export async function registerAgentIdentity(
   profile: AgentProfile,
   agentURI?: string

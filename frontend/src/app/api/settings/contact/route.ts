@@ -1,12 +1,29 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
+import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
-const supabase = createClient(
-  process.env.SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
-);
+export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
+
+function getSupabase(): SupabaseClient | null {
+  const url = process.env.SUPABASE_URL;
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!url?.trim() || !key?.trim()) return null;
+  return createClient(url, key);
+}
+
+const emptyContact = {
+  telegram_handle: "",
+  email: "",
+  phone: "",
+  reveal_price_cents: 0,
+};
 
 export async function GET(req: NextRequest) {
+  const supabase = getSupabase();
+  if (!supabase) {
+    return NextResponse.json(emptyContact);
+  }
+
   const wallet = req.nextUrl.searchParams.get("wallet");
   if (!wallet) return NextResponse.json({ error: "missing wallet" }, { status: 400 });
 
@@ -19,18 +36,26 @@ export async function GET(req: NextRequest) {
   if (error && error.code !== "PGRST116") {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
-  return NextResponse.json(data ?? { telegram_handle: "", email: "", phone: "", reveal_price_cents: 0 });
+  return NextResponse.json(data ?? emptyContact);
 }
 
 export async function POST(req: NextRequest) {
+  const supabase = getSupabase();
+  if (!supabase) {
+    return NextResponse.json({ error: "Contact storage not configured (set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY)" }, { status: 503 });
+  }
+
   const body = await req.json() as {
-    wallet: string; telegram_handle: string; email: string; phone: string; reveal_price_cents?: number;
+    wallet: string;
+    telegram_handle: string;
+    email: string;
+    phone: string;
+    reveal_price_cents?: number;
   };
   if (!body.wallet?.startsWith("0x")) {
     return NextResponse.json({ error: "invalid wallet" }, { status: 400 });
   }
 
-  // Preserve existing telegram_chat_id when updating other fields
   const { data: existing } = await supabase
     .from("contact_reveals")
     .select("telegram_chat_id")

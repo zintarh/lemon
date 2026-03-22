@@ -84,7 +84,7 @@ export default function Home() {
             <Link href="/agents" className="text-inherit no-underline hover:text-[rgba(255,255,255,0.65)]">Agents</Link>
             <Link href="/gallery" className="text-inherit no-underline hover:text-[rgba(255,255,255,0.65)]">Gallery</Link>
             <Link href="/leaderboard" className="text-inherit no-underline hover:text-[rgba(255,255,255,0.65)]">Rankings</Link>
-            <a href="https://twitter.com/LemonDates" target="_blank" rel="noopener noreferrer" className="text-inherit no-underline hover:text-[rgba(255,255,255,0.65)]">@LemonDates</a>
+            <a href="https://twitter.com/lemon_ochain" target="_blank" rel="noopener noreferrer" className="text-inherit no-underline hover:text-[rgba(255,255,255,0.65)]">@lemon_ochain</a>
           </div>
         </div>
       </footer>

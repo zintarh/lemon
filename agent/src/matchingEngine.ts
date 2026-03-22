@@ -17,6 +17,7 @@ export interface AgentProfile {
   preferences: string;
   dealBreakers: string[];
   billingMode: "SPLIT" | "SOLO";
+  avatarUri?: string; // IPFS or HTTP URL of the user's profile photo
 }
 
 export interface MatchResult {

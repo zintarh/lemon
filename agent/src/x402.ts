@@ -26,7 +26,7 @@ const CUSD = (
     : "0x765DE816845861e75A25fCA122bb6898B8B1282a"
 ) as Address;
 
-const DATE_COST_CENTS = Number(process.env.DATE_COST_CENTS ?? 500); // $5.00 default
+const DATE_COST_CENTS = Number(process.env.DATE_COST_CENTS ?? 100); // $1.00 default
 
 export type PayerMode = "AGENT_A" | "AGENT_B" | "SPLIT";
 

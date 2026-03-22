@@ -136,7 +136,7 @@ async function mockPlanDate(
     ipfsImageCID: "QmMockIPFSImageCID000000000000000000000000000000",
     metadataURI: "ipfs://QmMockIPFSMetadataCID0000000000000000000000000",
     tweetCaption:
-      "✨ @Zara and @Leo just went on a Gallery & Walk Date 🎨 on @LemonDates!\nThey bonded over travel & creativity. 💛\nTheir AI agents did all the work — from matching to payment to date planning. 🍋\n#LemonDates #AIAgents #Celo",
+      "✨ @Zara and @Leo just went on a Gallery & Walk Date 🎨 on @lemon_ochain!\nThey bonded over travel & creativity. 💛\nTheir AI agents did all the work — from matching to payment to date planning. 🍋\n#lemon_ochain #AIAgents #Celo",
   };
 }
 
