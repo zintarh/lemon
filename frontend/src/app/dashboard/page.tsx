@@ -1756,6 +1756,133 @@ function HistoryPanel({
   );
 }
 
+function DateAttemptsPanel({
+  dateIds,
+  myAddress,
+  onOpenDate,
+}: {
+  dateIds: bigint[];
+  myAddress: Address;
+  onOpenDate?: (id: bigint) => void;
+}) {
+  return (
+    <div className="flex h-full flex-col gap-4 overflow-hidden">
+      <div className="flex items-center justify-between shrink-0">
+        <div>
+          <p className="mb-[2px] text-[11px] font-bold uppercase tracking-[0.1em] text-[rgba(26,18,6,0.35)]">
+            All Dates
+          </p>
+          <h2 className="text-[20px] font-bold tracking-[-0.02em] text-[#1a1206]">Date Attempts</h2>
+        </div>
+        <Link href="/leaderboard" className="text-[12px] font-bold text-[#D6820A] no-underline hover:underline">
+          Leaderboard →
+        </Link>
+      </div>
+
+      {dateIds.length === 0 ? (
+        <div className="flex flex-1 flex-col items-center justify-center gap-3 text-center">
+          <span className="text-[32px]">🍋</span>
+          <p className="text-[14px] font-medium text-[rgba(26,18,6,0.45)]">No dates yet</p>
+          <p className="max-w-[220px] text-[12px] text-[rgba(26,18,6,0.28)]">
+            Your agent&apos;s date history will appear here once matched.
+          </p>
+        </div>
+      ) : (
+        <div className="flex-1 overflow-y-auto pr-1">
+          <div className="flex flex-col gap-2 pb-2">
+            {[...dateIds].reverse().map((id) => (
+              <DateCard key={id.toString()} dateId={id} myAddress={myAddress} onOpen={onOpenDate} />
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SidebarPanel({
+  myAddress,
+  stats,
+}: {
+  myAddress: Address;
+  stats: AgentStats | null;
+}) {
+  const [isVerified, setIsVerified] = useState<boolean | null>(null);
+  const [hasIdentity, setHasIdentity] = useState<boolean | null>(null);
+  const [identityId, setIdentityId] = useState<string | null>(null);
+  const [agentWallet, setAgentWallet] = useState<string | null>(null);
+  const SERVER_URL = process.env.NEXT_PUBLIC_SERVER_URL ?? "http://localhost:4000";
+
+  useEffect(() => {
+    if (!myAddress) return;
+    fetch(`${SERVER_URL}/api/agents/${myAddress}`)
+      .then(r => r.json())
+      .then(d => {
+        const id = d.erc8004_agent_id;
+        const hasId = !!(id && id !== "0");
+        setHasIdentity(hasId);
+        setIdentityId(hasId ? id : null);
+        setIsVerified(!!(d.selfclaw_verified));
+        setAgentWallet(d.agent_wallet ?? null);
+      })
+      .catch(() => { setIsVerified(null); setHasIdentity(null); });
+  }, [myAddress, SERVER_URL]);
+
+  const handleIdentitySuccess = useCallback((agentId: string) => {
+    setHasIdentity(true);
+    setIdentityId(agentId);
+  }, []);
+
+  return (
+    <div className="flex h-full flex-col gap-4 overflow-y-auto">
+      <div>
+        <p className="mb-[2px] text-[11px] font-bold uppercase tracking-[0.1em] text-[rgba(26,18,6,0.35)]">Overview</p>
+        <h2 className="mb-3 text-[20px] font-bold tracking-[-0.02em] text-[#1a1206]">Your Stats</h2>
+        <StatsRow stats={stats} />
+        {stats?.badges && stats.badges.length > 0 && (
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            {stats.badges.map(b => (
+              <span key={b} className="rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[10px] font-semibold text-amber-700">
+                {b}
+              </span>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <Separator className="bg-[rgba(0,0,0,0.06)]" />
+
+      {hasIdentity === true && identityId && (
+        <>
+          <IdentityBadge agentId={identityId} />
+          <Separator className="bg-[rgba(0,0,0,0.06)]" />
+        </>
+      )}
+
+      {(myAddress || agentWallet) && (
+        <>
+          <WalletAddressCard userAddress={myAddress} agentAddress={agentWallet} />
+          <Separator className="bg-[rgba(0,0,0,0.06)]" />
+        </>
+      )}
+
+      {hasIdentity === false && (
+        <>
+          <GetIdentityCard myAddress={myAddress} SERVER_URL={SERVER_URL} onSuccess={handleIdentitySuccess} />
+          <Separator className="bg-[rgba(0,0,0,0.06)]" />
+        </>
+      )}
+
+      {hasIdentity !== false && isVerified === false && (
+        <>
+          <VerifyIdentityCard myAddress={myAddress} SERVER_URL={SERVER_URL} />
+          <Separator className="bg-[rgba(0,0,0,0.06)]" />
+        </>
+      )}
+    </div>
+  );
+}
+
 // ── Not Connected ─────────────────────────────────────────────────────────────
 
 function NotConnected() {
@@ -1961,19 +2088,21 @@ export default function DashboardPage() {
 
   const myAddress = address;
 
-  const sharedHistoryProps = {
-    dateIds: allDateIds,
-    myAddress,
-    stats: agentStats,
-  };
-
   return (
     <div className="flex min-h-screen flex-col bg-[#FDFAF6]">
       <DashNav name={profile?.name} avatarSrc={resolveAvatar(profile?.avatarURI)} />
 
-      {/* ── Desktop two-column layout ── */}
-      <div className="mx-auto hidden w-full max-w-[1200px] flex-1 gap-6 px-6 py-6 lg:flex">
-        {/* Left: active date / idle */}
+      {/* ── Desktop three-column layout ── */}
+      <div className="mx-auto hidden w-full max-w-[1400px] flex-1 gap-6 px-6 py-6 lg:flex">
+        {/* Left: date attempts */}
+        <div
+          className="flex w-[330px] shrink-0 flex-col rounded-3xl border border-[rgba(0,0,0,0.06)] bg-white p-5 shadow-[0_4px_24px_rgba(0,0,0,0.05)]"
+          style={{ maxHeight: "calc(100vh - 72px - 48px)", overflowY: "hidden" }}
+        >
+          <DateAttemptsPanel dateIds={allDateIds} myAddress={myAddress} onOpenDate={setSelectedDateId} />
+        </div>
+
+        {/* Center: active date / idle */}
         <div className="flex flex-1 flex-col rounded-3xl border border-[rgba(0,0,0,0.06)] bg-white p-5 shadow-[0_4px_24px_rgba(0,0,0,0.05)]" style={{ maxHeight: "calc(100vh - 72px - 48px)", overflow: "hidden" }}>
           {displayDateId !== undefined ? (
             <ActiveDatePanel dateId={displayDateId} myAddress={myAddress} />
@@ -1991,12 +2120,12 @@ export default function DashboardPage() {
           )}
         </div>
 
-        {/* Right: history */}
+        {/* Right: stats + controls */}
         <div
-          className="flex w-[380px] shrink-0 flex-col rounded-3xl border border-[rgba(0,0,0,0.06)] bg-white p-6 shadow-[0_4px_24px_rgba(0,0,0,0.05)]"
+          className="flex w-[360px] shrink-0 flex-col rounded-3xl border border-[rgba(0,0,0,0.06)] bg-white p-6 shadow-[0_4px_24px_rgba(0,0,0,0.05)]"
           style={{ maxHeight: "calc(100vh - 72px - 48px)", overflowY: "hidden" }}
         >
-          <HistoryPanel {...sharedHistoryProps} onOpenDate={setSelectedDateId} />
+          <SidebarPanel myAddress={myAddress} stats={agentStats} />
         </div>
       </div>
 
@@ -2042,7 +2171,7 @@ export default function DashboardPage() {
 
           <TabsContent value="history">
             <div className="rounded-3xl border border-[rgba(0,0,0,0.06)] bg-white p-5 shadow-[0_4px_24px_rgba(0,0,0,0.05)]">
-              <HistoryPanel {...sharedHistoryProps} onOpenDate={setSelectedDateId} />
+              <HistoryPanel dateIds={allDateIds} myAddress={myAddress} stats={agentStats} onOpenDate={setSelectedDateId} />
             </div>
           </TabsContent>
         </Tabs>
