@@ -439,6 +439,24 @@ async function performDateBooking(
 
   // 4. Book on-chain (no payment taken yet — booking must succeed first)
   const signerKey = agentAKey;
+
+  // Auto-top-up: if either agent wallet has < 0.005 CELO, drip from deployer
+  for (const [key, addr, name] of [
+    [agentAKey, agentA.agent_wallet, agentA.name],
+    [agentBKey, agentB.agent_wallet, agentB.name],
+  ] as [string, string, string][]) {
+    if (!addr) continue;
+    try {
+      const bal = await publicClient.getBalance({ address: addr as Address });
+      if (bal < BigInt("5000000000000000")) { // < 0.005 CELO
+        console.log(`[booking] ${name} agent wallet low on CELO (${Number(bal)/1e18}), topping up…`);
+        await fundAgentWallet(addr as Address);
+      }
+    } catch (topUpErr) {
+      console.warn(`[booking] Auto top-up for ${name} failed (non-fatal):`, (topUpErr as Error).message);
+    }
+  }
+
   let dateId: bigint;
   try {
     dateId = await bookDate({
@@ -450,16 +468,19 @@ async function performDateBooking(
   } catch (e) {
     const raw = (e as Error).message ?? "";
     if (raw.includes("insufficient funds") || raw.includes("exceeds the balance")) {
-      // Fetch both agents' CELO balances for a helpful message
+      // The signer is the agent's own generated wallet (agent_wallet), NOT the user's wallet.
+      // Fetch CELO balance of both agent wallets so the message is accurate.
+      const agentWalletA = (agentA.agent_wallet ?? walletA) as Address;
+      const agentWalletB = (agentB.agent_wallet ?? walletB) as Address;
       const [balA, balB] = await Promise.all([
-        publicClient.getBalance({ address: walletA as Address }).catch(() => 0n),
-        publicClient.getBalance({ address: walletB as Address }).catch(() => 0n),
+        publicClient.getBalance({ address: agentWalletA }).catch(() => 0n),
+        publicClient.getBalance({ address: agentWalletB }).catch(() => 0n),
       ]);
       const fmt = (b: bigint) => (Number(b) / 1e18).toFixed(4);
       throw new Error(
-        `Your agent's wallet doesn't have enough CELO to cover gas for this booking. ` +
-        `Current balances — ${agentA.name}: ${fmt(balA)} CELO, ${agentB.name}: ${fmt(balB)} CELO. ` +
-        `Top up your agent wallet with a little CELO (0.01 is plenty) and retry.`
+        `${agentA.name}'s agent wallet needs a little CELO for gas to book this date. ` +
+        `Agent wallet balances — ${agentA.name}: ${fmt(balA)} CELO, ${agentB.name}: ${fmt(balB)} CELO. ` +
+        `Send 0.01 CELO to the agent wallet address shown in your dashboard and retry.`
       );
     }
     throw new Error(`Booking failed: ${raw}`);

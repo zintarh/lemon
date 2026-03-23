@@ -146,13 +146,8 @@ export async function bookDate(params: {
     ? createAgentWalletClient(params.agentPrivateKey)
     : walletClient;
 
-  const dc = getContract({
-    address: process.env.LEMON_DATE_CONTRACT as Address,
-    abi: dateAbi,
-    client: { public: publicClient, wallet: signerClient },
-  });
-
-  const hash = await dc.write.bookDate([
+  const contractAddress = process.env.LEMON_DATE_CONTRACT as Address;
+  const callArgs = [
     params.agentA,
     params.agentB,
     TEMPLATE_INDEX[params.template],
@@ -160,7 +155,34 @@ export async function bookDate(params: {
     params.paymentToken,
     params.payerA,
     params.payerB,
-  ]);
+  ] as const;
+
+  // Simulate first — surfaces the real revert reason before viem swallows it
+  // as a misleading "insufficient funds" error.
+  try {
+    await publicClient.simulateContract({
+      address: contractAddress,
+      abi: dateAbi,
+      functionName: "bookDate",
+      args: callArgs,
+      account: signerClient.account,
+    });
+  } catch (simErr) {
+    const msg = (simErr as Error).message ?? String(simErr);
+    // Strip viem noise — pull out just the revert reason if present
+    const revertMatch = msg.match(/reverted with reason string '(.+?)'/)?.[1]
+      ?? msg.match(/Error: (.+)/)?.[1]
+      ?? msg.split("\n")[0];
+    throw new Error(`Contract rejected the booking: ${revertMatch}`);
+  }
+
+  const dc = getContract({
+    address: contractAddress,
+    abi: dateAbi,
+    client: { public: publicClient, wallet: signerClient },
+  });
+
+  const hash = await dc.write.bookDate(callArgs);
 
   const receipt = await publicClient.waitForTransactionReceipt({ hash });
 
