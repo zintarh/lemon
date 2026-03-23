@@ -31,6 +31,7 @@ import {
   generateAgentWallet,
   setOperatorKey,
   fundAgentWallet,
+  approveCusdForContract,
   publicClient,
   PaymentShortfallError,
 } from "./onchain.js";
@@ -440,29 +441,40 @@ async function performDateBooking(
   // 4. Book on-chain (no payment taken yet — booking must succeed first)
   const signerKey = agentAKey;
 
-  // Auto-top-up: if either agent wallet has < 0.005 CELO, drip from deployer
-  for (const [key, addr, name] of [
-    [agentAKey, agentA.agent_wallet, agentA.name],
-    [agentBKey, agentB.agent_wallet, agentB.name],
-  ] as [string, string, string][]) {
-    if (!addr) continue;
+  // Agent wallets are the actual cUSD holders (funded during onboarding)
+  const agentWalletA = (agentA.agent_wallet ?? walletA) as Address;
+  const agentWalletB = (agentB.agent_wallet ?? walletB) as Address;
+
+  // Auto-top-up CELO: if either agent wallet has < 0.005 CELO, drip from deployer
+  for (const [addr, name] of [[agentWalletA, agentA.name], [agentWalletB, agentB.name]] as [Address, string][]) {
     try {
-      const bal = await publicClient.getBalance({ address: addr as Address });
+      const bal = await publicClient.getBalance({ address: addr });
       if (bal < BigInt("5000000000000000")) { // < 0.005 CELO
         console.log(`[booking] ${name} agent wallet low on CELO (${Number(bal)/1e18}), topping up…`);
-        await fundAgentWallet(addr as Address);
+        await fundAgentWallet(addr);
       }
     } catch (topUpErr) {
       console.warn(`[booking] Auto top-up for ${name} failed (non-fatal):`, (topUpErr as Error).message);
     }
   }
 
+  // Approve LemonDate contract to pull cUSD from both agent wallets (skips if already approved)
+  await Promise.all([
+    approveCusdForContract(agentAKey, process.env.LEMON_DATE_CONTRACT as Address, CUSD_ADDRESS).catch(e =>
+      console.warn(`[booking] cUSD approve failed for ${agentA.name}:`, (e as Error).message)
+    ),
+    approveCusdForContract(agentBKey, process.env.LEMON_DATE_CONTRACT as Address, CUSD_ADDRESS).catch(e =>
+      console.warn(`[booking] cUSD approve failed for ${agentB.name}:`, (e as Error).message)
+    ),
+  ]);
+
   let dateId: bigint;
   try {
     dateId = await bookDate({
       agentA: walletA, agentB: walletB, template, payerMode,
       paymentToken: CUSD_ADDRESS,
-      payerA: walletA as Address, payerB: walletB as Address,
+      payerA: agentWalletA, // agent wallet holds the cUSD, not the user wallet
+      payerB: agentWalletB,
       agentPrivateKey: signerKey,
     });
   } catch (e) {

@@ -613,3 +613,41 @@ export async function fundAgentWallet(agentWalletAddress: Address): Promise<void
   await publicClient.waitForTransactionReceipt({ hash: celoHash });
   console.log(`[onchain] Funded agent wallet ${agentWalletAddress} with 0.05 CELO (gas only)`);
 }
+
+/**
+ * Approves the LemonDate contract to spend cUSD from an agent wallet.
+ * Uses max uint256 so this only needs to happen once per agent.
+ */
+export async function approveCusdForContract(
+  agentPrivateKey: `0x${string}`,
+  spenderAddress: Address,
+  cUSDAddress: Address,
+): Promise<void> {
+  const agentClient = createAgentWalletClient(agentPrivateKey);
+  const MAX = BigInt("0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+
+  // Check existing allowance — skip if already approved
+  const { privateKeyToAddress } = await import("viem/accounts");
+  const agentAddr = privateKeyToAddress(agentPrivateKey);
+  const existing = await publicClient.readContract({
+    address: cUSDAddress,
+    abi: parseAbi(["function allowance(address owner, address spender) view returns (uint256)"]),
+    functionName: "allowance",
+    args: [agentAddr, spenderAddress],
+  });
+
+  if (existing >= parseUnits("100", 18)) {
+    console.log(`[onchain] cUSD allowance already set for ${agentAddr} → skipping approve`);
+    return;
+  }
+
+  const hash = await agentClient.writeContract({
+    address: cUSDAddress,
+    abi: parseAbi(["function approve(address spender, uint256 amount) returns (bool)"]),
+    functionName: "approve",
+    args: [spenderAddress, MAX],
+    chain,
+  });
+  await publicClient.waitForTransactionReceipt({ hash });
+  console.log(`[onchain] ✓ cUSD approved: ${agentAddr} → ${spenderAddress}`);
+}
