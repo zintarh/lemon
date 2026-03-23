@@ -1131,10 +1131,6 @@ const IS_MAINNET = process.env.NEXT_PUBLIC_NETWORK === "mainnet";
 const REGISTRY_CONTRACT = IS_MAINNET
   ? "0x8004A169FB4a3325136EB29fA0ceB6D2e539a432"
   : "0x8004A818BFB912233c491871b3d84c89A494BD9e";
-const CELOSCAN_BASE = IS_MAINNET
-  ? "https://celoscan.io"
-  : "https://sepolia.celoscan.io";
-
 function IdentityBadge({ agentId }: { agentId: string }) {
   const [copied, setCopied] = useState(false);
   function copy() {
@@ -1143,7 +1139,9 @@ function IdentityBadge({ agentId }: { agentId: string }) {
       setTimeout(() => setCopied(false), 1500);
     });
   }
-  const explorerUrl = `${CELOSCAN_BASE}/token/${REGISTRY_CONTRACT}?a=${agentId}`;
+  // AgentScan uses internal UUIDs for agent URLs (not the on-chain integer ID).
+  // Link to the agents list — user can search by name or copy the ID below.
+  const explorerUrl = `https://agentscan.info/agents`;
   return (
     <div className="flex items-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2">
       <span className="flex h-5 w-5 items-center justify-center rounded-full bg-emerald-500 text-white text-[10px] font-bold shrink-0">✓</span>
@@ -1156,7 +1154,7 @@ function IdentityBadge({ agentId }: { agentId: string }) {
         target="_blank"
         rel="noopener noreferrer"
         className="shrink-0 text-emerald-400 hover:text-emerald-700 transition-colors"
-        title="View on CeloScan"
+        title="View on AgentScan"
       >
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" /><polyline points="15 3 21 3 21 9" /><line x1="10" y1="14" x2="21" y2="3" /></svg>
       </a>

@@ -106,9 +106,16 @@ async function uploadMetadataToIPFS(metadata: object, name: string): Promise<str
 /**
  * Builds the ERC-8004 compliant registration metadata object.
  * Spec: https://eips.ethereum.org/EIPS/eip-8004#registration-v1
+ *
+ * agentId is optional on first registration (unknown until tx confirms).
+ * After registration, call refreshAgentURI with the real agentId so the
+ * registrations[] array is populated — this is what AgentScan uses to index.
  */
-function buildERC8004Metadata(agent: AgentIdentityPayload) {
+function buildERC8004Metadata(agent: AgentIdentityPayload, agentId?: bigint) {
   const agentAddress = privateKeyToAccount(agent.agentPrivateKey as Hex).address;
+  const registrations = agentId !== undefined
+    ? [{ agentId: agentId.toString(), agentRegistry: `eip155:${CHAIN_ID}:${REGISTRY_ADDRESS}` }]
+    : [];
   return {
     type: "https://eips.ethereum.org/EIPS/eip-8004#registration-v1",
     name: agent.name,
@@ -116,18 +123,21 @@ function buildERC8004Metadata(agent: AgentIdentityPayload) {
     image: agent.avatarUri ?? "https://lemon.dating/lemon-single.png",
     services: [
       {
-        name: "A2A",
-        endpoint: "https://lemon.dating/.well-known/agent-card.json",
+        name: "web",
+        endpoint: "https://lemon.dating",
+        version: "1.0",
+      },
+      {
+        name: "agentWallet",
+        endpoint: `eip155:${CHAIN_ID}:${agentAddress}`,
         version: "1.0",
       },
     ],
-    capabilities: ["dating", "matching", "conversation", "nft-minting"],
+    registrations,
     supportedTrust: ["reputation", "crypto-economic"],
     active: true,
-    agentWallet: `eip155:${CHAIN_ID}:${agentAddress}`,
-    ownerWallet: `eip155:${CHAIN_ID}:${agent.wallet}`,
+    x402Support: false,
     platform: "lemon.dating",
-    registeredAt: agent.registeredAt,
   };
 }
 
@@ -145,20 +155,18 @@ export async function registerERC8004Agent(agent: AgentIdentityPayload): Promise
     transport: http(rpcUrl),
   });
 
-  // Build ERC-8004 compliant metadata and upload to IPFS
-  const metadata = buildERC8004Metadata(agent);
-  console.log(`[erc8004] Uploading metadata for "${agent.name}" to IPFS…`);
-  const cid = await uploadMetadataToIPFS(metadata, `lemon-agent-${agent.name}`);
-  const tokenURI = `ipfs://${cid}`;
-  console.log(`[erc8004] Metadata pinned: ${tokenURI}`);
+  // Step 1 — register with minimal metadata (agentId unknown yet)
+  const prelimMetadata = buildERC8004Metadata(agent);
+  console.log(`[erc8004] Uploading preliminary metadata for "${agent.name}" to IPFS…`);
+  const prelimCid = await uploadMetadataToIPFS(prelimMetadata, `lemon-agent-${agent.name}-prelim`);
+  const prelimURI = `ipfs://${prelimCid}`;
 
   console.log(`[erc8004] Registering agent "${agent.name}" on ${IS_MAINNET ? "mainnet" : "testnet"}, registry=${REGISTRY_ADDRESS}`);
-
   const hash = await walletClient.writeContract({
     address: REGISTRY_ADDRESS as Hex,
     abi: REGISTRY_ABI,
     functionName: "register",
-    args: [tokenURI],
+    args: [prelimURI],
   });
 
   console.log(`[erc8004] Tx sent: ${hash} — waiting for receipt…`);
@@ -179,6 +187,14 @@ export async function registerERC8004Agent(agent: AgentIdentityPayload): Promise
       });
       const agentId = (decoded.args as { agentId: bigint }).agentId;
       console.log(`[erc8004] ✓ Agent "${agent.name}" registered — ERC-8004 id #${agentId}, tx: ${hash}`);
+
+      // Step 2 — update URI with full metadata including registrations[] so AgentScan can index it
+      try {
+        await refreshAgentURI(agent, agentId, walletClient, publicClient);
+      } catch (err) {
+        console.warn(`[erc8004] setAgentURI (step 2) failed — agent is registered but metadata lacks registrations[]:`, err);
+      }
+
       return agentId;
     } catch {
       // not the Registered event — skip
@@ -190,28 +206,32 @@ export async function registerERC8004Agent(agent: AgentIdentityPayload): Promise
 
 /**
  * Updates the tokenURI of an already-registered agent on-chain.
- * Used to migrate existing agents from data: URIs to IPFS URIs so they
- * appear correctly on AgentScan.
+ * Uploads full ERC-8004 metadata (including registrations[]) to IPFS,
+ * then calls setAgentURI so AgentScan can index the agent properly.
+ *
+ * Accepts optional pre-built clients to avoid redundant instantiation
+ * when called immediately after register().
  */
 export async function refreshAgentURI(
   agent: AgentIdentityPayload,
-  agentId: bigint
+  agentId: bigint,
+  existingWalletClient?: ReturnType<typeof createWalletClient>,
+  existingPublicClient?: ReturnType<typeof createPublicClient>
 ): Promise<string> {
-  const account = privateKeyToAccount(agent.agentPrivateKey as Hex);
-
-  const walletClient = createWalletClient({
-    account,
+  const walletClient = existingWalletClient ?? createWalletClient({
+    account: privateKeyToAccount(agent.agentPrivateKey as Hex),
     chain,
     transport: http(rpcUrl),
   });
 
-  const publicClient = createPublicClient({
+  const publicClient = existingPublicClient ?? createPublicClient({
     chain,
     transport: http(rpcUrl),
   });
 
-  const metadata = buildERC8004Metadata(agent);
-  console.log(`[erc8004] Uploading refreshed metadata for "${agent.name}" to IPFS…`);
+  // Build metadata with the real agentId so registrations[] is populated
+  const metadata = buildERC8004Metadata(agent, agentId);
+  console.log(`[erc8004] Uploading full metadata for "${agent.name}" (id #${agentId}) to IPFS…`);
   const cid = await uploadMetadataToIPFS(metadata, `lemon-agent-${agent.name}`);
   const tokenURI = `ipfs://${cid}`;
 
@@ -224,6 +244,6 @@ export async function refreshAgentURI(
   });
 
   await publicClient.waitForTransactionReceipt({ hash });
-  console.log(`[erc8004] ✓ Agent #${agentId} URI updated to ${tokenURI} (tx: ${hash})`);
+  console.log(`[erc8004] ✓ Agent #${agentId} URI updated → ${tokenURI} (tx: ${hash})`);
   return tokenURI;
 }

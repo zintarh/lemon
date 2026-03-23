@@ -131,13 +131,21 @@ export async function generateDateImage(
 
     if (avatarUrlA) {
       console.log("[dateAgent] Fetching avatar for agent A…");
-      const img = await fetchAsBase64(avatarUrlA);
-      parts.push({ inlineData: img });
+      try {
+        const img = await fetchAsBase64(avatarUrlA);
+        parts.push({ inlineData: img });
+      } catch (e) {
+        console.warn("[dateAgent] Could not fetch avatar A, skipping:", (e as Error).message);
+      }
     }
     if (avatarUrlB) {
       console.log("[dateAgent] Fetching avatar for agent B…");
-      const img = await fetchAsBase64(avatarUrlB);
-      parts.push({ inlineData: img });
+      try {
+        const img = await fetchAsBase64(avatarUrlB);
+        parts.push({ inlineData: img });
+      } catch (e) {
+        console.warn("[dateAgent] Could not fetch avatar B, skipping:", (e as Error).message);
+      }
     }
   } else {
     prompt =
@@ -148,7 +156,7 @@ export async function generateDateImage(
   }
 
   const model = genAI.getGenerativeModel({
-    model: "gemini-2.0-flash-exp",
+    model: "gemini-2.5-flash-image",
     // @ts-expect-error — responseModalities not yet typed in SDK
     generationConfig: { responseModalities: ["IMAGE", "TEXT"] },
   });

@@ -453,6 +453,52 @@ export async function collectPayment(params: {
   }
 }
 
+/**
+ * Refunds cUSD from the treasury back to agent wallets.
+ * Called when a date booking fails AFTER payment was already collected.
+ * Gas is always paid in CELO (no feeCurrency).
+ */
+export async function refundPayment(params: {
+  payerMode: "AGENT_A" | "AGENT_B" | "SPLIT";
+  agentAPrivateKey: `0x${string}`;
+  agentBPrivateKey: `0x${string}`;
+  agentAName: string;
+  agentBName: string;
+  treasuryAddress: Address;
+  cUSDAddress: Address;
+  amountUSD: string;
+}): Promise<void> {
+  const { payerMode, agentAPrivateKey, agentBPrivateKey, agentAName, agentBName, treasuryAddress, cUSDAddress, amountUSD } = params;
+  const { parseUnits: pu } = await import("viem");
+  const { privateKeyToAddress } = await import("viem/accounts");
+
+  async function refundTo(toKey: `0x${string}`, agentName: string, amount: string): Promise<void> {
+    const toAddr = privateKeyToAddress(toKey);
+    const needed = pu(amount, 18);
+    // Treasury wallet signs the refund transfer
+    const hash = await walletClient.writeContract({
+      address: cUSDAddress,
+      abi: erc20TransferAbi,
+      functionName: "transfer",
+      args: [toAddr, needed],
+    });
+    await publicClient.waitForTransactionReceipt({ hash });
+    console.log(`[refund] ✓ ${amount} cUSD refunded to ${agentName} (${toAddr})`);
+  }
+
+  if (payerMode === "SPLIT") {
+    const half = (parseFloat(amountUSD) / 2).toFixed(6);
+    await Promise.all([
+      refundTo(agentAPrivateKey, agentAName, half),
+      refundTo(agentBPrivateKey, agentBName, half),
+    ]);
+  } else {
+    const payerKey = payerMode === "AGENT_A" ? agentAPrivateKey : agentBPrivateKey;
+    const payerName = payerMode === "AGENT_A" ? agentAName : agentBName;
+    await refundTo(payerKey, payerName, amountUSD);
+  }
+}
+
 export type AgentProfile = {
   wallet: Address;
   name: string;

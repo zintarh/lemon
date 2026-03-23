@@ -27,8 +27,7 @@ import {
   mintNFT,
   resolveNextPayer,
   collectPayment,
-  checkPaymentBalances,
-  PaymentShortfallError,
+  refundPayment,
   generateAgentWallet,
   setOperatorKey,
   fundAgentWallet,
@@ -409,7 +408,7 @@ async function performDateBooking(
     payerMode = onChainPayer.toLowerCase() === walletA.toLowerCase() ? "AGENT_A" : "AGENT_B";
   }
 
-  // 2. Check balances upfront before attempting payment
+  // 2. Resolve agent keys and treasury
   const agentAKey = agentA.agent_private_key as `0x${string}` | undefined;
   const agentBKey = agentB.agent_private_key as `0x${string}` | undefined;
   if (!agentAKey || !agentBKey) throw new Error("Agent private keys not found — cannot process payment");
@@ -420,60 +419,7 @@ async function performDateBooking(
 
   if (!treasuryAddress) throw new Error("LEMON_TREASURY_ADDRESS is not set");
 
-  const shortfall = await checkPaymentBalances({
-    payerMode: payerMode as "AGENT_A" | "AGENT_B" | "SPLIT",
-    agentAPrivateKey: agentAKey,
-    agentBPrivateKey: agentBKey,
-    agentAName: agentA.name,
-    agentBName: agentB.name,
-    userWalletA: walletA,
-    userWalletB: walletB,
-    cUSDAddress: CUSD_ADDRESS,
-    amountUSD: DATE_COST_USD_STR,
-  });
-
-  if (shortfall) {
-    // If one side has enough and can cover the full cost, create an approval request
-    if (shortfall.funded.length > 0 && opts.convoId) {
-      const funded = shortfall.funded[0];
-      const short = shortfall.shortfalls[0];
-      const approval = {
-        fundedWallet: funded.userWallet,
-        fundedAgentName: funded.agentName,
-        shortWallet: short.userWallet,
-        shortAgentName: short.agentName,
-        shortAgentWalletAddress: short.agentWalletAddress,
-        shortHas: short.has,
-        shortNeeds: short.needs,
-        fullAmountUSD: funded.fullAmountUSD,
-        template,
-        sharedInterests,
-        status: "pending",
-        expiresAt: Date.now() + 24 * 60 * 60 * 1000, // 24h window
-      };
-      const { data: convoRow } = await supabase.from("conversations").select("transcript").eq("id", opts.convoId).single();
-      const existing = (convoRow?.transcript as Record<string, unknown>) ?? {};
-      await supabase.from("conversations").update({
-        transcript: { ...existing, bookingPending: false, bookingError: null, paymentApproval: approval },
-      }).eq("id", opts.convoId);
-      console.log(`[payment] ⏳ Payment approval pending — ${funded.agentName} asked to cover full cost for ${short.agentName}`);
-    }
-    throw shortfall;
-  }
-
-  // 3. Collect payment
-  await collectPayment({
-    payerMode: payerMode as "AGENT_A" | "AGENT_B" | "SPLIT",
-    agentAPrivateKey: agentAKey,
-    agentBPrivateKey: agentBKey,
-    agentAName: agentA.name,
-    agentBName: agentB.name,
-    treasuryAddress,
-    cUSDAddress: CUSD_ADDRESS,
-    amountUSD: DATE_COST_USD_STR,
-  });
-
-  // 3. Plan the date (image + metadata — payment already done)
+  // 3. Plan the date (AI — no money touched yet)
   let plan: Awaited<ReturnType<typeof agentCall>>;
   try {
     plan = await agentCall("/plan-date", {
@@ -490,7 +436,7 @@ async function performDateBooking(
   const TEMPLATE_NUM: Record<string, number> = { COFFEE: 0, BEACH: 1, WORK: 2, ROOFTOP_DINNER: 3, GALLERY_WALK: 4 };
   const PAYER_NUM: Record<string, number> = { AGENT_A: 0, AGENT_B: 1, SPLIT: 2 };
 
-  // 4. Book on-chain
+  // 4. Book on-chain (no payment taken yet — booking must succeed first)
   const signerKey = agentAKey;
   let dateId: bigint;
   try {
@@ -514,6 +460,26 @@ async function performDateBooking(
   });
   console.log(`[server] date #${dateId} written to DB (status: ACTIVE)`);
 
+  // 4b. Collect payment — only after booking is confirmed on-chain.
+  //     Gas is always paid in CELO (no feeCurrency set), never cUSD.
+  try {
+    await collectPayment({
+      payerMode: payerMode as "AGENT_A" | "AGENT_B" | "SPLIT",
+      agentAPrivateKey: agentAKey,
+      agentBPrivateKey: agentBKey,
+      agentAName: agentA.name,
+      agentBName: agentB.name,
+      treasuryAddress,
+      cUSDAddress: CUSD_ADDRESS,
+      amountUSD: DATE_COST_USD_STR,
+    });
+  } catch (payErr) {
+    // Booking exists on-chain but payment failed — cancel the date so agents aren't charged later
+    console.error("[server] Payment failed after booking — cancelling date", dateId.toString(), payErr);
+    await dbUpdateDate(dateId.toString(), { status: 3 });
+    throw payErr;
+  }
+
   // 5. Mint NFT
   let nftTokenId: bigint;
   try {
@@ -522,9 +488,20 @@ async function performDateBooking(
       metadataURI: plan.metadataURI, agentPrivateKey: signerKey,
     });
   } catch (mintErr) {
-    console.error("[server] mintNFT failed — marking date cancelled", dateId.toString(), mintErr);
+    // Payment was already collected — refund both agents by returning cUSD from treasury
+    console.error("[server] mintNFT failed after payment — issuing refund", dateId.toString(), mintErr);
     await dbUpdateDate(dateId.toString(), { status: 3 });
     await completeDate(dateId, 0n).catch(() => {});
+    await refundPayment({
+      payerMode: payerMode as "AGENT_A" | "AGENT_B" | "SPLIT",
+      agentAPrivateKey: agentAKey,
+      agentBPrivateKey: agentBKey,
+      agentAName: agentA.name,
+      agentBName: agentB.name,
+      treasuryAddress,
+      cUSDAddress: CUSD_ADDRESS,
+      amountUSD: DATE_COST_USD_STR,
+    }).catch((refundErr) => console.error("[server] Refund also failed:", refundErr));
     throw mintErr;
   }
 
@@ -1120,43 +1097,11 @@ async function runMatchingCycle() {
       return;
     }
 
-    // Filter out agents whose wallets have less than 1 cUSD — enough to cover a date
-    const MIN_CUSD = parseUnits("1", 18);
-    const { privateKeyToAddress } = await import("viem/accounts");
-    const fundedAgents: typeof allAgents = [];
-    for (const a of allAgents) {
-      if (!a.agent_private_key) {
-        console.log(`[matcher] Warning: ${a.name} (${a.wallet.slice(0, 8)}) has no agent private key — including anyway, balance unknown`);
-        fundedAgents.push(a); // include: agent went through onboarding, assume funded
-        continue;
-      }
-      try {
-        const addr = privateKeyToAddress(a.agent_private_key as `0x${string}`);
-        const bal = await publicClient.readContract({
-          address: CUSD_ADDRESS,
-          abi: parseAbi(["function balanceOf(address) view returns (uint256)"]),
-          functionName: "balanceOf",
-          args: [addr],
-        });
-        if (bal >= MIN_CUSD) {
-          fundedAgents.push(a);
-        } else {
-          console.log(`[matcher] Skipping ${a.name} (${a.wallet.slice(0, 8)}) — agent wallet has ${formatUnits(bal, 18)} cUSD (needs ≥ 1)`);
-        }
-      } catch {
-        console.log(`[matcher] Warning: could not check balance for ${a.name} (${a.wallet.slice(0, 8)}) — including anyway`);
-        fundedAgents.push(a); // include: RPC error shouldn't block matching
-      }
-    }
+    // All active agents are eligible — balance is checked at payment time, not here.
+    // Users can fund their wallet at any point; matching should never be blocked by balance.
+    const agents = allAgents;
 
-    const agents = fundedAgents;
-
-    if (agents.length < 2) {
-      console.log(`[matcher] Skipping — only ${agents.length} funded agent(s) in pool (need ≥ 2 with ≥ 1 cUSD).`);
-      return;
-    }
-
-    console.log(`[matcher] Running match cycle for ${agents.length} funded agents (${allAgents.length - agents.length} skipped — low balance)…`);
+    console.log(`[matcher] Running match cycle for ${agents.length} agent(s)…`);
     console.log(`[matcher] AGENT_URL=${AGENT_URL}`);
 
     const profiles = agents.map((a) => ({
