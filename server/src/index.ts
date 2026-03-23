@@ -52,6 +52,7 @@ import {
   dbSaveConversation,
   dbAppendConversationMessage,
   dbGetLiveConversation,
+  dbAgentHasActiveDate,
   dbHasActiveDateBetween,
   dbHasLiveConversationBetween,
   dbMarkConversationDone,
@@ -414,6 +415,14 @@ async function performDateBooking(
   const [agentA, agentB] = await Promise.all([dbGetAgent(walletA), dbGetAgent(walletB)]);
   if (!agentA || !agentB) throw new Error("One or both agents not found in DB");
 
+  // Guard: an agent can only be on one date at a time
+  const [busyA, busyB] = await Promise.all([
+    dbAgentHasActiveDate(walletA),
+    dbAgentHasActiveDate(walletB),
+  ]);
+  if (busyA) throw new Error(`${agentA.name} is already on an active date — cannot start another`);
+  if (busyB) throw new Error(`${agentB.name} is already on an active date — cannot start another`);
+
   const toProfile = (a: typeof agentA) => ({
     wallet: a!.wallet, name: a!.name, personality: a!.personality,
     preferences: a!.preferences, dealBreakers: a!.deal_breakers,
@@ -623,32 +632,34 @@ async function performDateBooking(
     throw mintErr;
   }
 
-  // 6. Complete on-chain + DB
-  await completeDate(dateId, nftTokenId);
-  const completedAt = Math.floor(Date.now() / 1000);
-  await dbUpdateDate(dateId.toString(), {
-    status: 2, nft_token_id: nftTokenId.toString(), completed_at: completedAt,
-  });
-  console.log(`[server] date #${dateId} COMPLETED (nft: ${nftTokenId})`);
-
-  // 7. Telegram notifications (non-fatal)
-  const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? process.env.SERVER_URL ?? "https://lemon.dating";
-  // Rematch suggestion after every date
-  sendRematchSuggestion(walletA.toLowerCase(), walletB.toLowerCase(), agentA.name, agentB.name, template, appUrl)
-    .catch(() => {});
-  // Contact reveal intro after 3rd date
-  dbCountCompletedDatesBetween(walletA.toLowerCase(), walletB.toLowerCase())
-    .then(async (count) => {
-      if (count === 3) await sendIntroMessage(walletA.toLowerCase(), walletB.toLowerCase(), agentA.name, agentB.name).catch(() => {});
-    }).catch(() => {});
-
-  // 8. Tweet (non-fatal)
+  // 6. Tweet — must succeed (or be attempted) before the date is marked complete.
+  //    A date is only COMPLETED once: booking confirmed + NFT minted + tweet posted.
   let tweetUrl: string | null = null;
   try {
     const tweet = await postDateTweet({ ipfsImageCID: plan.ipfsImageCID, caption: plan.tweetCaption });
     tweetUrl = tweet.tweetUrl;
-    await dbUpdateDate(dateId.toString(), { tweet_url: tweetUrl });
-  } catch { /* non-fatal */ }
+    console.log(`[server] tweet posted: ${tweetUrl}`);
+  } catch (tweetErr) {
+    // Non-fatal — Twitter API can be flaky; don't block date completion
+    console.warn("[server] Tweet failed (non-fatal):", (tweetErr as Error).message);
+  }
+
+  // 7. Complete on-chain + DB — only after NFT is minted and tweet was attempted
+  await completeDate(dateId, nftTokenId);
+  const completedAt = Math.floor(Date.now() / 1000);
+  await dbUpdateDate(dateId.toString(), {
+    status: 2, nft_token_id: nftTokenId.toString(), completed_at: completedAt, tweet_url: tweetUrl,
+  });
+  console.log(`[server] date #${dateId} COMPLETED (nft: ${nftTokenId}, tweet: ${tweetUrl ?? "none"})`);
+
+  // 8. Telegram notifications (non-fatal)
+  const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? process.env.SERVER_URL ?? "https://lemon.dating";
+  sendRematchSuggestion(walletA.toLowerCase(), walletB.toLowerCase(), agentA.name, agentB.name, template, appUrl)
+    .catch(() => {});
+  dbCountCompletedDatesBetween(walletA.toLowerCase(), walletB.toLowerCase())
+    .then(async (count) => {
+      if (count === 3) await sendIntroMessage(walletA.toLowerCase(), walletB.toLowerCase(), agentA.name, agentB.name).catch(() => {});
+    }).catch(() => {});
 
   return { dateId: dateId.toString(), nftTokenId: nftTokenId.toString(), metadataURI: plan.metadataURI, imageUrl: plan.imageUrl, tweetUrl };
 }
@@ -1275,11 +1286,24 @@ async function runMatchingCycle() {
       return;
     }
 
-    // All active agents are eligible — balance is checked at payment time, not here.
-    // Users can fund their wallet at any point; matching should never be blocked by balance.
-    const agents = allAgents;
+    // Exclude agents already on an active or pending date — one date at a time.
+    const availableAgents: typeof allAgents = [];
+    for (const a of allAgents) {
+      const busy = await dbAgentHasActiveDate(a.wallet);
+      if (busy) {
+        console.log(`[matcher] Skipping ${a.name} (${a.wallet.slice(0, 8)}) — already on an active date`);
+      } else {
+        availableAgents.push(a);
+      }
+    }
+    const agents = availableAgents;
 
-    console.log(`[matcher] Running match cycle for ${agents.length} agent(s)…`);
+    if (agents.length < 2) {
+      console.log(`[matcher] Skipping — only ${agents.length} available agent(s) (others are on active dates).`);
+      return;
+    }
+
+    console.log(`[matcher] Running match cycle for ${agents.length} available agent(s) (${allAgents.length - agents.length} on active dates)…`);
     console.log(`[matcher] AGENT_URL=${AGENT_URL}`);
 
     const profiles = agents.map((a) => ({

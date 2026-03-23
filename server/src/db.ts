@@ -304,6 +304,22 @@ export async function dbUpsertContactReveal(row: Omit<ContactRevealRow, "updated
   if (error) throw new Error(`[db] upsertContactReveal: ${error.message}`);
 }
 
+/**
+ * Returns true if this agent has any pending (0) or active (1) date with ANYONE.
+ * Used to prevent an agent from going on two dates at the same time.
+ */
+export async function dbAgentHasActiveDate(wallet: string): Promise<boolean> {
+  const w = wallet.toLowerCase();
+  const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+  const { count } = await supabase
+    .from("dates")
+    .select("*", { count: "exact", head: true })
+    .in("status", [0, 1])
+    .gte("indexed_at", twoHoursAgo)
+    .or(`agent_a.eq.${w},agent_b.eq.${w}`);
+  return (count ?? 0) > 0;
+}
+
 /** Returns true if a pending (0) or active (1) date already exists between two agents,
  *  indexed within the last 2 hours. Older stuck rows are treated as expired.
  *  Uses `indexed_at` (see supabase/schema.sql — `dates` has no `created_at`). */
