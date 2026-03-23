@@ -59,6 +59,15 @@ type DateRecord = {
   completedAt: bigint;
 };
 
+type ServerDateMeta = {
+  status?: number;
+  nft_token_id?: string | null;
+  tweet_url?: string | null;
+  failure_reason?: string | null;
+  refund_status?: string | null;
+  refund_note?: string | null;
+};
+
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 function shortAddr(addr: string) {
@@ -163,6 +172,22 @@ function DateCard({ dateId, myAddress }: { dateId: bigint; myAddress: Address })
     ? (record.agentA.toLowerCase() === myAddress.toLowerCase() ? record.agentB : record.agentA) as Address
     : undefined;
   const { data: partnerProfile } = useAgentProfile(partnerAddr);
+  const [meta, setMeta] = useState<ServerDateMeta | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`${SERVER}/api/date/${dateId.toString()}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (!cancelled) setMeta(d);
+      })
+      .catch(() => {
+        if (!cancelled) setMeta(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [dateId]);
 
   if (!record) {
     return <div className="h-[68px] animate-pulse rounded-2xl bg-[rgba(0,0,0,0.04)]" />;
@@ -175,6 +200,22 @@ function DateCard({ dateId, myAddress }: { dateId: bigint; myAddress: Address })
     : null;
   const partnerName = partnerProfile?.name ?? shortAddr(partnerAddr ?? "0x0000");
   const avatar = resolveAvatar(partnerProfile?.avatarURI);
+  const detailLabel =
+    record.status === 2
+      ? meta?.nft_token_id
+        ? meta?.tweet_url
+          ? "NFT minted + posted on X"
+          : "NFT minted (X post pending/failed)"
+        : "Completed, but NFT token missing"
+      : record.status === 3
+      ? meta?.refund_status === "refunded"
+        ? "Cancelled • Refunded"
+        : meta?.refund_status === "failed"
+        ? "Cancelled • Refund failed"
+        : meta?.refund_status === "not_charged"
+        ? "Cancelled • Not charged"
+        : "Cancelled"
+      : s.label;
 
   return (
     <button className="w-full flex items-center gap-3 px-3 py-2.5 rounded-2xl hover:bg-[rgba(0,0,0,0.025)] transition-colors text-left">
@@ -199,13 +240,18 @@ function DateCard({ dateId, myAddress }: { dateId: bigint; myAddress: Address })
         </div>
         <div className="flex items-center justify-between gap-2">
           <span className="text-[12.5px] text-[rgba(26,18,6,0.45)] truncate">
-            {DATE_TEMPLATE_LABELS[record.template] ?? "Date"}
+            {DATE_TEMPLATE_LABELS[record.template] ?? "Date"} · {detailLabel}
           </span>
           <Badge className={`shrink-0 rounded-full border px-2 py-0 text-[10px] font-semibold ${s.className}`}>
             {s.dot && <span className="mr-1 inline-block h-[5px] w-[5px] animate-pulse rounded-full bg-green-500" />}
             {s.label}
           </Badge>
         </div>
+        {record.status === 3 && meta?.failure_reason && (
+          <p className="mt-1 text-[10.5px] text-[rgba(26,18,6,0.4)] line-clamp-2">
+            {meta.failure_reason}
+          </p>
+        )}
       </div>
     </button>
   );
@@ -614,6 +660,8 @@ function LiveConversationPanel({
   const [retrying, setRetrying] = useState(false);
   const [dismissed, setDismissed] = useState(false);
   const [approvalLoading, setApprovalLoading] = useState(false);
+  const [poolChoice, setPoolChoice] = useState<"loading" | "pending" | "yes" | "no">("loading");
+  const [poolLoading, setPoolLoading] = useState(false);
 
   const amIwallet_a = myAddress?.toLowerCase() === convo.wallet_a.toLowerCase();
   const partnerName = amIwallet_a ? nameB : nameA;
@@ -675,6 +723,45 @@ function LiveConversationPanel({
       toast.error("Could not reach server");
     }
   }
+
+  async function setActiveStatus(active: boolean) {
+    if (!myAddress) return;
+    setPoolLoading(true);
+    try {
+      const r = await fetch(`${SERVER_URL}/api/agents/${myAddress}/active`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ active }),
+      });
+      if (!r.ok) throw new Error("Failed");
+      setPoolChoice(active ? "yes" : "no");
+      toast.success(active ? "Back in the pool" : "Agent paused");
+    } catch {
+      // optimistic fallback
+      setPoolChoice(active ? "yes" : "no");
+    } finally {
+      setPoolLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    if (!bookingComplete || !myAddress) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await fetch(`${SERVER_URL}/api/agents/${myAddress}`);
+        const d = await r.json().catch(() => ({}));
+        if (cancelled) return;
+        const active = !!d?.active;
+        setPoolChoice(active ? "yes" : "pending");
+      } catch {
+        if (!cancelled) setPoolChoice("pending");
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [bookingComplete, myAddress, SERVER_URL]);
 
   const clampedCount = Math.min(chatMessages.length, MAX_CHAT_MESSAGES);
   const chatProgress = Math.round((clampedCount / MAX_CHAT_MESSAGES) * 100);
@@ -920,23 +1007,80 @@ function LiveConversationPanel({
             </div>
           )}
 
-          {/* Rematch after success */}
+          {/* After completion: explicit pool re-entry */}
           {bookingComplete && (
-            <div className="flex gap-2">
-              {partnerName && (
-                <button
-                  onClick={handleRematch}
-                  className="flex-1 rounded-xl border border-amber-300 bg-amber-100 py-2 text-[12px] font-bold text-amber-800 cursor-pointer hover:bg-amber-200 transition-colors"
-                >
-                  💛 Date {partnerName} again
-                </button>
+            <div className="rounded-xl border border-[rgba(0,0,0,0.08)] bg-[#FAFAF8] p-3 flex flex-col gap-3">
+              <div>
+                <p className="text-[13px] font-bold text-[#1a1206]">Re-enter matching pool?</p>
+                <p className="text-[11px] text-[rgba(26,18,6,0.45)] leading-snug">
+                  Your agent is paused after this completed date. Choose when to match again.
+                </p>
+              </div>
+              {poolChoice === "loading" ? (
+                <div className="flex items-center gap-2 text-[11px] text-[rgba(26,18,6,0.45)]">
+                  <LemonPulseLoader className="h-3.5 w-3.5" />
+                  Checking pool status…
+                </div>
+              ) : poolChoice === "pending" ? (
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => setActiveStatus(false)}
+                    disabled={poolLoading}
+                    className="flex-1 rounded-xl border border-[rgba(0,0,0,0.1)] bg-white py-2 text-[12px] font-semibold text-[rgba(26,18,6,0.6)] disabled:opacity-50 cursor-pointer hover:bg-[rgba(0,0,0,0.03)] transition-colors"
+                  >
+                    Not now
+                  </button>
+                  <button
+                    onClick={() => setActiveStatus(true)}
+                    disabled={poolLoading}
+                    className="flex-1 rounded-xl border-none bg-[#D6820A] py-2 text-[12px] font-bold text-white disabled:opacity-50 cursor-pointer hover:bg-[#b8690a] transition-colors"
+                  >
+                    Yes, re-enter
+                  </button>
+                </div>
+              ) : poolChoice === "yes" ? (
+                <div className="flex gap-2">
+                  <div className="flex-1 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-[11px] text-emerald-700">
+                    Back in the pool. Matching can run again.
+                  </div>
+                  <button
+                    onClick={() => setActiveStatus(false)}
+                    disabled={poolLoading}
+                    className="rounded-xl border border-[rgba(0,0,0,0.1)] bg-white px-3 py-2 text-[11px] font-semibold text-[rgba(26,18,6,0.6)] disabled:opacity-50 cursor-pointer hover:bg-[rgba(0,0,0,0.03)] transition-colors"
+                  >
+                    Pause
+                  </button>
+                </div>
+              ) : (
+                <div className="flex gap-2">
+                  <div className="flex-1 rounded-xl border border-[rgba(0,0,0,0.08)] bg-white px-3 py-2 text-[11px] text-[rgba(26,18,6,0.55)]">
+                    Agent paused. No new automatic matches.
+                  </div>
+                  <button
+                    onClick={() => setActiveStatus(true)}
+                    disabled={poolLoading}
+                    className="rounded-xl border-none bg-[#D6820A] px-3 py-2 text-[11px] font-bold text-white disabled:opacity-50 cursor-pointer hover:bg-[#b8690a] transition-colors"
+                  >
+                    Re-enter
+                  </button>
+                </div>
               )}
-              <button
-                onClick={() => setDismissed(true)}
-                className="flex-1 rounded-xl border border-[rgba(0,0,0,0.1)] bg-white py-2 text-[12px] font-semibold text-[rgba(26,18,6,0.55)] cursor-pointer hover:bg-[rgba(0,0,0,0.03)] transition-colors"
-              >
-                🔍 Back to pool
-              </button>
+              <div className="flex gap-2">
+                {partnerName && (
+                  <button
+                    onClick={handleRematch}
+                    className="flex-1 rounded-xl border border-amber-300 bg-amber-100 py-2 text-[12px] font-bold text-amber-800 cursor-pointer hover:bg-amber-200 transition-colors"
+                  >
+                    💛 Date {partnerName} again
+                  </button>
+                )}
+                <button
+                  onClick={() => setDismissed(true)}
+                  className="flex-1 rounded-xl border border-[rgba(0,0,0,0.1)] bg-white py-2 text-[12px] font-semibold text-[rgba(26,18,6,0.55)] cursor-pointer hover:bg-[rgba(0,0,0,0.03)] transition-colors"
+                >
+                  Close
+                </button>
+              </div>
             </div>
           )}
         </div>
@@ -1495,7 +1639,7 @@ function HistoryPanel({
           <p className="mb-[2px] text-[11px] font-bold uppercase tracking-[0.1em] text-[rgba(26,18,6,0.35)]">
             All Dates
           </p>
-          <h2 className="text-[20px] font-bold tracking-[-0.02em] text-[#1a1206]">Date History</h2>
+          <h2 className="text-[20px] font-bold tracking-[-0.02em] text-[#1a1206]">Date Attempts</h2>
         </div>
         <Link href="/leaderboard" className="text-[12px] font-bold text-[#D6820A] no-underline hover:underline">
           Leaderboard →

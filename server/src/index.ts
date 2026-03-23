@@ -532,7 +532,9 @@ async function performDateBooking(
     template: TEMPLATE_NUM[template] ?? 0, status: 1, payer_mode: PAYER_NUM[payerMode] ?? 2,
     cost_usd: "0", payment_token: CUSD_ADDRESS, x402_tx_hash: "", nft_token_id: null,
     scheduled_at: scheduledAt, completed_at: null, metadata_uri: plan.metadataURI,
-    image_url: plan.imageUrl, tweet_url: null, indexed_at: new Date().toISOString(),
+    image_url: plan.imageUrl, tweet_url: null,
+    failure_reason: null, refund_status: null, refund_note: null,
+    indexed_at: new Date().toISOString(),
   });
   console.log(`[server] date #${dateId} written to DB (status: ACTIVE)`);
 
@@ -553,7 +555,12 @@ async function performDateBooking(
 
   if (shortfallErr) {
     // Cancel the on-chain booking so the slot is freed
-    await dbUpdateDate(dateId.toString(), { status: 3 });
+    await dbUpdateDate(dateId.toString(), {
+      status: 3,
+      failure_reason: shortfallErr.message,
+      refund_status: "not_charged",
+      refund_note: "No payment collected due to insufficient cUSD balance.",
+    });
     console.warn("[server] Payment shortfall detected — saving approval request", shortfallErr.shortfalls.map(s => s.agentName));
 
     // Persist paymentApproval to transcript so the frontend shows the approval UI
@@ -602,9 +609,34 @@ async function performDateBooking(
       amountUSD,
     });
   } catch (payErr) {
-    // Booking exists on-chain but payment failed — cancel the date so agents aren't charged later
+    // Booking exists on-chain but payment failed — cancel and attempt refund in case
+    // a partial transfer occurred before the failure.
     console.error("[server] Payment failed after booking — cancelling date", dateId.toString(), payErr);
-    await dbUpdateDate(dateId.toString(), { status: 3 });
+    let refundStatus = "not_needed";
+    let refundNote = "Payment failed before any transfer completed.";
+    try {
+      await refundPayment({
+        payerMode: payerMode as "AGENT_A" | "AGENT_B" | "SPLIT",
+        agentAPrivateKey: agentAKey,
+        agentBPrivateKey: agentBKey,
+        agentAName: agentA.name,
+        agentBName: agentB.name,
+        treasuryAddress,
+        cUSDAddress: CUSD_ADDRESS,
+        amountUSD,
+      });
+      refundStatus = "refunded";
+      refundNote = "Partial payment was detected and refunded.";
+    } catch (refundErr) {
+      refundStatus = "failed";
+      refundNote = `Automatic refund failed: ${(refundErr as Error).message}`;
+    }
+    await dbUpdateDate(dateId.toString(), {
+      status: 3,
+      failure_reason: (payErr as Error).message,
+      refund_status: refundStatus,
+      refund_note: refundNote,
+    });
     throw payErr;
   }
 
@@ -618,40 +650,68 @@ async function performDateBooking(
   } catch (mintErr) {
     // Payment was already collected — cancel on-chain and refund cUSD to agent wallets
     console.error("[server] mintNFT failed after payment — cancelling date and issuing refund", dateId.toString(), mintErr);
-    await dbUpdateDate(dateId.toString(), { status: 3 });
+    await dbUpdateDate(dateId.toString(), {
+      status: 3,
+      failure_reason: (mintErr as Error).message,
+      refund_status: "pending",
+      refund_note: "Attempting refund after mint failure.",
+    });
     await cancelDate(dateId).catch(() => {});
-    await refundPayment({
-      payerMode: payerMode as "AGENT_A" | "AGENT_B" | "SPLIT",
-      agentAPrivateKey: agentAKey,
-      agentBPrivateKey: agentBKey,
-      agentAName: agentA.name,
-      agentBName: agentB.name,
-      treasuryAddress,
-      cUSDAddress: CUSD_ADDRESS,
-      amountUSD,
-    }).catch((refundErr) => console.error("[server] Refund also failed:", refundErr));
+    try {
+      await refundPayment({
+        payerMode: payerMode as "AGENT_A" | "AGENT_B" | "SPLIT",
+        agentAPrivateKey: agentAKey,
+        agentBPrivateKey: agentBKey,
+        agentAName: agentA.name,
+        agentBName: agentB.name,
+        treasuryAddress,
+        cUSDAddress: CUSD_ADDRESS,
+        amountUSD,
+      });
+      await dbUpdateDate(dateId.toString(), {
+        refund_status: "refunded",
+        refund_note: "Refund completed after mint failure.",
+      });
+    } catch (refundErr) {
+      console.error("[server] Refund also failed:", refundErr);
+      await dbUpdateDate(dateId.toString(), {
+        refund_status: "failed",
+        refund_note: `Automatic refund failed: ${(refundErr as Error).message}`,
+      });
+    }
     throw mintErr;
   }
 
-  // 6. Tweet — must succeed (or be attempted) before the date is marked complete.
-  //    A date is only COMPLETED once: booking confirmed + NFT minted + tweet posted.
+  // 6. Complete on-chain + DB — only after NFT is minted
+  await completeDate(dateId, nftTokenId);
+  const completedAt = Math.floor(Date.now() / 1000);
+  await dbUpdateDate(dateId.toString(), {
+    status: 2, nft_token_id: nftTokenId.toString(), completed_at: completedAt,
+  });
+  console.log(`[server] date #${dateId} COMPLETED (nft: ${nftTokenId})`);
+
+  // Require an explicit "re-enter pool" choice after each completed date.
+  // This prevents surprise back-to-back auto-matches.
+  try {
+    await supabase
+      .from("agents")
+      .update({ active: false })
+      .in("wallet", [walletA.toLowerCase(), walletB.toLowerCase()]);
+    console.log(`[server] agents auto-paused after completion: ${walletA.slice(0, 8)} / ${walletB.slice(0, 8)}`);
+  } catch (pauseErr) {
+    console.warn("[server] auto-pause failed (non-fatal):", (pauseErr as Error).message);
+  }
+
+  // 7. Tweet after completion (non-fatal)
   let tweetUrl: string | null = null;
   try {
     const tweet = await postDateTweet({ ipfsImageCID: plan.ipfsImageCID, caption: plan.tweetCaption });
     tweetUrl = tweet.tweetUrl;
+    await dbUpdateDate(dateId.toString(), { tweet_url: tweetUrl });
     console.log(`[server] tweet posted: ${tweetUrl}`);
   } catch (tweetErr) {
-    // Non-fatal — Twitter API can be flaky; don't block date completion
     console.warn("[server] Tweet failed (non-fatal):", (tweetErr as Error).message);
   }
-
-  // 7. Complete on-chain + DB — only after NFT is minted and tweet was attempted
-  await completeDate(dateId, nftTokenId);
-  const completedAt = Math.floor(Date.now() / 1000);
-  await dbUpdateDate(dateId.toString(), {
-    status: 2, nft_token_id: nftTokenId.toString(), completed_at: completedAt, tweet_url: tweetUrl,
-  });
-  console.log(`[server] date #${dateId} COMPLETED (nft: ${nftTokenId}, tweet: ${tweetUrl ?? "none"})`);
 
   // 8. Telegram notifications (non-fatal)
   const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? process.env.SERVER_URL ?? "https://lemon.dating";
