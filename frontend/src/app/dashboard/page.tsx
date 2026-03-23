@@ -1157,7 +1157,7 @@ function CopyableAddress({ label, address }: { label: string; address: string })
   );
 }
 
-const CUSD_MAINNET = "0xcebA9300f2b948710d2653dD7B07f33A8B32118C" as const;
+const CUSD_MAINNET = "0x765DE816845861e75A25fCA122bb6898B8B1282a" as const;
 const IS_MAINNET_DASH = process.env.NEXT_PUBLIC_NETWORK === "mainnet";
 
 function AgentBalances({ agentAddress }: { agentAddress: string }) {
