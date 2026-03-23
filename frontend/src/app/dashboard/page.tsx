@@ -166,7 +166,15 @@ function StatsRow({ stats }: { stats: AgentStats | null }) {
 
 // ── DateCard ─────────────────────────────────────────────────────────────────
 
-function DateCard({ dateId, myAddress }: { dateId: bigint; myAddress: Address }) {
+function DateCard({
+  dateId,
+  myAddress,
+  onOpen,
+}: {
+  dateId: bigint;
+  myAddress: Address;
+  onOpen?: (id: bigint) => void;
+}) {
   const { data: record } = useDateRecord(dateId) as { data: DateRecord | undefined };
   const partnerAddr = record
     ? (record.agentA.toLowerCase() === myAddress.toLowerCase() ? record.agentB : record.agentA) as Address
@@ -218,7 +226,10 @@ function DateCard({ dateId, myAddress }: { dateId: bigint; myAddress: Address })
       : s.label;
 
   return (
-    <button className="w-full flex items-center gap-3 px-3 py-2.5 rounded-2xl hover:bg-[rgba(0,0,0,0.025)] transition-colors text-left">
+    <button
+      onClick={() => onOpen?.(dateId)}
+      className="w-full flex items-center gap-3 px-3 py-2.5 rounded-2xl hover:bg-[rgba(0,0,0,0.025)] transition-colors text-left cursor-pointer"
+    >
       {/* Avatar */}
       <div className="shrink-0 relative">
         {avatar ? (
@@ -375,6 +386,21 @@ function ActiveDatePanel({ dateId, myAddress }: { dateId: bigint; myAddress: Add
             <p className="mt-1 text-[12px] text-[rgba(26,18,6,0.45)]">Your agent won&apos;t be matched until you re-activate from settings.</p>
           </div>
         )}
+      </div>
+    );
+  }
+
+  // If timer is over but chain status is still ACTIVE, this attempt likely failed to
+  // finalize. Don't keep showing the "live date" interface forever.
+  if (isDone && record.status === 1) {
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-4 px-6 text-center">
+        <span className="text-[32px]">⚠️</span>
+        <p className="text-[20px] font-black tracking-[-0.02em] text-[#1a1206]">This date attempt is still marked active</p>
+        <p className="max-w-[360px] text-[13px] leading-[1.6] text-[rgba(26,18,6,0.5)]">
+          The timer ended, but this attempt did not fully finalize yet. Check Date Attempts on the right for
+          refund/cancellation details. Your agent can still re-enter the pool from the completion card once finalized.
+        </p>
       </div>
     );
   }
@@ -1550,10 +1576,12 @@ function HistoryPanel({
   dateIds,
   myAddress,
   stats,
+  onOpenDate,
 }: {
   dateIds: bigint[];
   myAddress: Address;
   stats: AgentStats | null;
+  onOpenDate?: (id: bigint) => void;
 }) {
   const [isVerified, setIsVerified] = useState<boolean | null>(null);
   const [hasIdentity, setHasIdentity] = useState<boolean | null>(null);
@@ -1658,7 +1686,7 @@ function HistoryPanel({
         <div className="flex-1 overflow-y-auto">
           <div className="flex flex-col gap-2 pb-2">
             {[...dateIds].reverse().map((id) => (
-              <DateCard key={id.toString()} dateId={id} myAddress={myAddress} />
+              <DateCard key={id.toString()} dateId={id} myAddress={myAddress} onOpen={onOpenDate} />
             ))}
           </div>
         </div>
@@ -1720,6 +1748,7 @@ export default function DashboardPage() {
   }, [searchParams, router]);
   const { data: profile } = useAgentProfile(address);
   const { data: onChainDateIds } = useAgentDates(address);
+  const [selectedDateId, setSelectedDateId] = useState<bigint | undefined>(undefined);
 
   // Fetch dates from server DB as the reliable source — on-chain cache can be stale
   const [serverDateIds, setServerDateIds] = useState<bigint[]>([]);
@@ -1782,13 +1811,21 @@ export default function DashboardPage() {
     query: { enabled: recentIds.length > 0 },
   });
 
+  const ACTIVE_MAX_AGE_S = 10 * 60; // stale active dates should not pin the live panel forever
   const activeDateId = (() => {
     if (!recentRecords) return undefined;
     const idx = recentRecords.findIndex(
-      (r) => r.result && (r.result as DateRecord).status === 1
+      (r) => {
+        if (!r.result) return false;
+        const rec = r.result as DateRecord;
+        if (rec.status !== 1) return false;
+        const ageSec = Math.floor(Date.now() / 1000) - Number(rec.scheduledAt);
+        return ageSec <= ACTIVE_MAX_AGE_S;
+      }
     );
     return idx >= 0 ? recentIds[idx] : undefined;
   })();
+  const displayDateId = selectedDateId ?? activeDateId;
 
   // Poll for live/pending conversation
   const [liveConvo, setLiveConvo] = useState<LiveConvoData | null>(null);
@@ -1797,7 +1834,7 @@ export default function DashboardPage() {
     : undefined;
   const { data: livePartnerProfile } = useAgentProfile(livePartnerAddr);
   useEffect(() => {
-    if (!address || activeDateId !== undefined) return;
+    if (!address || displayDateId !== undefined) return;
     let failures = 0;
     let id: ReturnType<typeof setInterval>;
     const poll = async () => {
@@ -1819,7 +1856,7 @@ export default function DashboardPage() {
     poll();
     id = setInterval(poll, 4_000);
     return () => clearInterval(id);
-  }, [address, activeDateId]);
+  }, [address, displayDateId]);
 
   // Show a toast when user reaches 3 completed dates with a partner (reveal eligibility)
   useEffect(() => {
@@ -1878,8 +1915,8 @@ export default function DashboardPage() {
       <div className="mx-auto hidden w-full max-w-[1200px] flex-1 gap-6 px-6 py-6 lg:flex">
         {/* Left: active date / idle */}
         <div className="flex flex-1 flex-col rounded-3xl border border-[rgba(0,0,0,0.06)] bg-white p-5 shadow-[0_4px_24px_rgba(0,0,0,0.05)]" style={{ maxHeight: "calc(100vh - 72px - 48px)", overflow: "hidden" }}>
-          {activeDateId !== undefined ? (
-            <ActiveDatePanel dateId={activeDateId} myAddress={myAddress} />
+          {displayDateId !== undefined ? (
+            <ActiveDatePanel dateId={displayDateId} myAddress={myAddress} />
           ) : liveConvo ? (
             <LiveConversationPanel
               convo={liveConvo}
@@ -1899,19 +1936,19 @@ export default function DashboardPage() {
           className="flex w-[380px] shrink-0 flex-col rounded-3xl border border-[rgba(0,0,0,0.06)] bg-white p-6 shadow-[0_4px_24px_rgba(0,0,0,0.05)]"
           style={{ maxHeight: "calc(100vh - 72px - 48px)", overflowY: "hidden" }}
         >
-          <HistoryPanel {...sharedHistoryProps} />
+          <HistoryPanel {...sharedHistoryProps} onOpenDate={setSelectedDateId} />
         </div>
       </div>
 
       {/* ── Mobile tabbed layout ── */}
       <div className="flex flex-1 flex-col px-4 py-4 lg:hidden">
-        <Tabs defaultValue={activeDateId !== undefined || liveConvo ? "live" : "history"}>
+        <Tabs defaultValue={displayDateId !== undefined || liveConvo ? "live" : "history"}>
           <TabsList className="mb-4 w-full rounded-2xl bg-[rgba(0,0,0,0.04)] p-1">
             <TabsTrigger
               value="live"
               className="flex-1 rounded-xl text-[13px] font-semibold data-[state=active]:bg-white data-[state=active]:shadow-sm"
             >
-              {activeDateId !== undefined && (
+              {displayDateId !== undefined && (
                 <span className="mr-1.5 inline-block h-[6px] w-[6px] animate-pulse rounded-full bg-green-500" />
               )}
               Live Date
@@ -1926,8 +1963,8 @@ export default function DashboardPage() {
 
           <TabsContent value="live">
             <div className="min-h-[520px] rounded-3xl border border-[rgba(0,0,0,0.06)] bg-white p-5 shadow-[0_4px_24px_rgba(0,0,0,0.05)]">
-              {activeDateId !== undefined ? (
-                <ActiveDatePanel dateId={activeDateId} myAddress={myAddress} />
+              {displayDateId !== undefined ? (
+                <ActiveDatePanel dateId={displayDateId} myAddress={myAddress} />
               ) : liveConvo ? (
                 <LiveConversationPanel
                   convo={liveConvo}
@@ -1945,7 +1982,7 @@ export default function DashboardPage() {
 
           <TabsContent value="history">
             <div className="rounded-3xl border border-[rgba(0,0,0,0.06)] bg-white p-5 shadow-[0_4px_24px_rgba(0,0,0,0.05)]">
-              <HistoryPanel {...sharedHistoryProps} />
+              <HistoryPanel {...sharedHistoryProps} onOpenDate={setSelectedDateId} />
             </div>
           </TabsContent>
         </Tabs>

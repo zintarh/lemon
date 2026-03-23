@@ -425,6 +425,17 @@ async function performDateBooking(
   }
   const [agentA, agentB] = await Promise.all([dbGetAgent(walletA), dbGetAgent(walletB)]);
   if (!agentA || !agentB) throw new Error("One or both agents not found in DB");
+  const pauseBothAgents = async (reason: string) => {
+    try {
+      await supabase
+        .from("agents")
+        .update({ active: false })
+        .in("wallet", [walletA.toLowerCase(), walletB.toLowerCase()]);
+      console.log(`[server] agents paused (${reason}): ${walletA.slice(0, 8)} / ${walletB.slice(0, 8)}`);
+    } catch (e) {
+      console.warn("[server] auto-pause failed (non-fatal):", (e as Error).message);
+    }
+  };
 
   // Guard: an agent can only be on one date at a time
   const [busyA, busyB] = await Promise.all([
@@ -571,6 +582,10 @@ async function performDateBooking(
       refund_status: "not_charged",
       refund_note: "No payment collected due to insufficient cUSD balance.",
     });
+    await cancelDate(dateId).catch((e) =>
+      console.warn("[server] cancelDate after shortfall failed (non-fatal):", (e as Error).message)
+    );
+    await pauseBothAgents("payment_shortfall");
     console.warn("[server] Payment shortfall detected — saving approval request", shortfallErr.shortfalls.map(s => s.agentName));
 
     // Persist paymentApproval to transcript so the frontend shows the approval UI
@@ -647,6 +662,10 @@ async function performDateBooking(
       refund_status: refundStatus,
       refund_note: refundNote,
     });
+    await cancelDate(dateId).catch((e) =>
+      console.warn("[server] cancelDate after payment failure failed (non-fatal):", (e as Error).message)
+    );
+    await pauseBothAgents("payment_failure");
     throw payErr;
   }
 
@@ -689,6 +708,7 @@ async function performDateBooking(
         refund_note: `Automatic refund failed: ${(refundErr as Error).message}`,
       });
     }
+    await pauseBothAgents("mint_failure");
     throw mintErr;
   }
 
@@ -700,17 +720,8 @@ async function performDateBooking(
   });
   console.log(`[server] date #${dateId} COMPLETED (nft: ${nftTokenId})`);
 
-  // Require an explicit "re-enter pool" choice after each completed date.
-  // This prevents surprise back-to-back auto-matches.
-  try {
-    await supabase
-      .from("agents")
-      .update({ active: false })
-      .in("wallet", [walletA.toLowerCase(), walletB.toLowerCase()]);
-    console.log(`[server] agents auto-paused after completion: ${walletA.slice(0, 8)} / ${walletB.slice(0, 8)}`);
-  } catch (pauseErr) {
-    console.warn("[server] auto-pause failed (non-fatal):", (pauseErr as Error).message);
-  }
+  // Require explicit human opt-in before any next date lifecycle.
+  await pauseBothAgents("date_completed");
 
   // 7. Tweet after completion (non-fatal)
   let tweetUrl: string | null = null;
@@ -1366,6 +1377,49 @@ async function cleanupZombieConversations() {
 }
 
 setInterval(cleanupZombieConversations, 5 * 60 * 1000);
+
+// ─── Stale active date cleanup ────────────────────────────────────────────────
+// Safety net: if a date stays ACTIVE far beyond its expected window, cancel it
+// so users don't remain stuck on a stale "live date" interface.
+async function cleanupStaleActiveDates() {
+  try {
+    const cutoffSec = Math.floor(Date.now() / 1000) - 15 * 60; // 15 minutes old
+    const { data: staleRows, error } = await supabase
+      .from("dates")
+      .select("date_id, agent_a, agent_b")
+      .eq("status", 1)
+      .lt("scheduled_at", cutoffSec)
+      .order("scheduled_at", { ascending: true })
+      .limit(50);
+    if (error) throw new Error(error.message);
+    if (!staleRows || staleRows.length === 0) return;
+
+    for (const row of staleRows) {
+      const id = BigInt(row.date_id);
+      try {
+        await cancelDate(id);
+      } catch (e) {
+        // If already completed/cancelled on-chain, still normalize DB state below.
+        console.warn(`[cleanup] cancelDate failed for #${row.date_id} (non-fatal):`, (e as Error).message);
+      }
+      await dbUpdateDate(row.date_id, {
+        status: 3,
+        failure_reason: "Date attempt timed out and was automatically cancelled.",
+        refund_status: "not_needed",
+        refund_note: "Stale active booking cleanup",
+      });
+      await supabase
+        .from("agents")
+        .update({ active: false })
+        .in("wallet", [String(row.agent_a).toLowerCase(), String(row.agent_b).toLowerCase()]);
+      console.log(`[cleanup] stale ACTIVE date cancelled: #${row.date_id}`);
+    }
+  } catch (e) {
+    console.error("[cleanup] Stale active date cleanup error:", (e as Error).message);
+  }
+}
+
+setInterval(cleanupStaleActiveDates, 5 * 60 * 1000);
 
 // ─── Matching scheduler ───────────────────────────────────────────────────────
 // Runs a matching attempt every MATCH_INTERVAL_MS. Skips if fewer than 2 agents
