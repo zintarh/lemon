@@ -1601,6 +1601,17 @@ export default function DashboardPage() {
   const { data: dateIds } = useAgentDates(address);
   const allDateIds = (dateIds as bigint[] | undefined) ?? [];
 
+  // Check if onboarding is complete (agent_wallet set on server)
+  // Registered on-chain but missing agent_wallet = they refreshed during onboarding → send back
+  const [onboardComplete, setOnboardComplete] = useState<boolean | null>(null);
+  useEffect(() => {
+    if (!address || !isRegistered) return;
+    fetch(`${SERVER}/api/agents/${address}`)
+      .then(r => r.ok ? r.json() : null)
+      .then(ag => { setOnboardComplete(!!(ag?.agent_wallet)); })
+      .catch(() => setOnboardComplete(true)); // Network error — don't block access
+  }, [address, isRegistered]);
+
   // Fetch stats from server (Supabase-backed leaderboard)
   const [agentStats, setAgentStats] = useState<AgentStats | null>(null);
   useEffect(() => {
@@ -1690,6 +1701,12 @@ export default function DashboardPage() {
 
   // Redirect to onboard if wallet connected but agent not registered
   if (!regLoading && isRegistered === false) {
+    router.replace("/onboard");
+    return null;
+  }
+
+  // Redirect to onboard if registered on-chain but onboarding not finished (no agent_wallet)
+  if (isRegistered && onboardComplete === false) {
     router.replace("/onboard");
     return null;
   }

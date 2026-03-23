@@ -614,6 +614,110 @@ export default function OnboardPage() {
   const [isServerRegistered, setIsServerRegistered] = useState<boolean | null>(null);
   const avatarInputRef = useRef<HTMLInputElement>(null);
 
+  // ── Resume detection ────────────────────────────────────────────────────────
+  // On mount, detect how far the user got in onboarding and resume from that step.
+  const [resumeCheck, setResumeCheck] = useState<"idle" | "checking" | "done">("idle");
+  const [isResumed, setIsResumed] = useState(false);
+
+  useEffect(() => {
+    if (!walletAddress || !publicClient) return;
+    if (resumeCheck !== "idle") return;
+    if (isPending || isConfirming || isSuccess) return; // Active registration flow — don't interfere
+
+    setResumeCheck("checking");
+
+    const SERVER = process.env.NEXT_PUBLIC_SERVER_URL ?? "http://localhost:4000";
+
+    const detect = async () => {
+      try {
+        // 1. On-chain check
+        const onChain = Boolean(await publicClient.readContract({
+          address: LEMON_AGENT_ADDRESS,
+          abi: lemonAgentAbi,
+          functionName: "isRegistered",
+          args: [walletAddress],
+        }));
+
+        if (!onChain) {
+          setResumeCheck("done"); // Not registered — show normal form
+          return;
+        }
+
+        // 2. Registered on-chain — get server record
+        let agentWallet: string | undefined;
+        const r = await fetch(`${SERVER}/api/agents/${walletAddress}`).catch(() => null);
+        if (r?.ok) {
+          const ag = await r.json().catch(() => ({}));
+          agentWallet = ag.agent_wallet;
+        }
+
+        // 3. If server doesn't know yet, trigger sync
+        if (!agentWallet) {
+          try {
+            await fetch(`${SERVER}/api/agents/register`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ wallet: walletAddress }),
+            });
+            const r2 = await fetch(`${SERVER}/api/agents/${walletAddress}`).catch(() => null);
+            if (r2?.ok) {
+              const ag2 = await r2.json().catch(() => ({}));
+              agentWallet = ag2.agent_wallet;
+            }
+          } catch { /* proceed without agent wallet */ }
+        }
+
+        if (agentWallet) setAgentWalletAddress(agentWallet);
+
+        // 4. Check CELO balance on agent wallet
+        const MIN_CELO = parseUnits("0.04", 18);
+        let hasEnoughCelo = false;
+        if (agentWallet) {
+          try {
+            const bal = await publicClient.getBalance({ address: agentWallet as `0x${string}` });
+            hasEnoughCelo = bal >= MIN_CELO;
+          } catch { /* assume unfunded */ }
+        }
+
+        if (!hasEnoughCelo) {
+          setFundStep("celo");
+          setIsResumed(true);
+          setResumeCheck("done");
+          return;
+        }
+
+        // 5. Check cUSD balance
+        const MIN_CUSD = parseUnits("2", 18);
+        let hasEnoughCusd = false;
+        if (agentWallet) {
+          try {
+            const bal = await publicClient.readContract({
+              address: CUSD_ADDRESS,
+              abi: erc20Abi,
+              functionName: "balanceOf",
+              args: [agentWallet as `0x${string}`],
+            }) as bigint;
+            hasEnoughCusd = bal >= MIN_CUSD;
+          } catch { /* assume unfunded */ }
+        }
+
+        if (!hasEnoughCusd) {
+          setFundStep("cusd");
+          setIsResumed(true);
+          setResumeCheck("done");
+          return;
+        }
+
+        // 6. Fully onboarded — redirect to dashboard
+        router.replace("/dashboard");
+      } catch {
+        setResumeCheck("done"); // Something went wrong — fall through to form
+      }
+    };
+
+    detect();
+  }, [walletAddress, publicClient, resumeCheck, isPending, isConfirming, isSuccess, router]);
+
   const template = TEMPLATES.find(t => t.id === selectedId);
 
   function selectTemplate(id: string) {
@@ -760,7 +864,21 @@ export default function OnboardPage() {
             const data = await r.json().catch(() => ({}));
             if (!cancelled) {
               setIsServerRegistered(true);
-              if (data.agent_wallet) setAgentWalletAddress(data.agent_wallet);
+              const server = process.env.NEXT_PUBLIC_SERVER_URL ?? "http://localhost:4000";
+              if (data.agent_wallet) {
+                setAgentWalletAddress(data.agent_wallet);
+              } else {
+                // Older servers omitted agent_wallet in the JSON — recover from GET /api/agents/:wallet
+                try {
+                  const gr = await fetch(`${server}/api/agents/${walletAddress}`);
+                  if (gr.ok) {
+                    const ag = await gr.json().catch(() => ({}));
+                    if (ag.agent_wallet) setAgentWalletAddress(ag.agent_wallet);
+                  }
+                } catch {
+                  /* ignore */
+                }
+              }
             }
           } else {
             // Server error but tx succeeded — log and still advance
@@ -800,6 +918,14 @@ export default function OnboardPage() {
     </div>
   );
 
+  // Detecting where user left off — show loader
+  if (resumeCheck === "checking") return (
+    <div className="h-[100svh] flex flex-col items-center justify-center gap-4 bg-[#FAFAF8]">
+      <LemonPulseLoader className="h-10 w-10" />
+      <p className="text-[13px] text-[#1a1206]/40">Checking your setup…</p>
+    </div>
+  );
+
   if (isSuccess && (isOnChainRegistered !== true || isServerRegistered !== true)) return (
     <div className={pageClass}>
       <MiniHeader />
@@ -832,7 +958,7 @@ export default function OnboardPage() {
     </div>
   );
 
-  if (isSuccess) return (
+  if (isSuccess || isResumed) return (
     <div className={pageClass}>
       <MiniHeader />
       <div className="flex-1 flex items-center justify-center px-6">
@@ -841,7 +967,7 @@ export default function OnboardPage() {
             ✓
           </div>
           <h1 className="font-black text-[clamp(24px,4vh,40px)] text-[#1a1206] tracking-[-0.04em] mb-[clamp(8px,1.5vh,14px)]">
-            {name || template?.title} is in the pool.
+            {name || template?.title || "Your agent"} is in the pool.
           </h1>
           <p className="text-[#1a1206]/50 text-[clamp(13px,1.8vh,15px)] leading-[1.65] mb-[clamp(20px,3.5vh,28px)]">
             Your agent joined the pool. To enter the dating queue it needs two things from your wallet: a little CELO for gas and cUSD to pay for dates.
