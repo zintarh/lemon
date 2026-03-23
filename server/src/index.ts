@@ -414,20 +414,16 @@ async function performDateBooking(
 
   if (!treasuryAddress) throw new Error("LEMON_TREASURY_ADDRESS is not set");
 
-  try {
-    await collectPayment({
-      payerMode: payerMode as "AGENT_A" | "AGENT_B" | "SPLIT",
-      agentAPrivateKey: agentAKey,
-      agentBPrivateKey: agentBKey,
-      treasuryAddress,
-      cUSDAddress: CUSD_ADDRESS,
-      amountUSD: DATE_COST_USD_STR,
-    });
-  } catch (e) {
-    // Payment failed — likely agent wallet has no cUSD yet (needs funding after onboarding).
-    // Log it but don't block the booking — date still completes, treasury reconciles separately.
-    console.error(`[payment] ⚠ cUSD transfer failed (non-fatal — fund agent wallets with cUSD): ${(e as Error).message}`);
-  }
+  await collectPayment({
+    payerMode: payerMode as "AGENT_A" | "AGENT_B" | "SPLIT",
+    agentAPrivateKey: agentAKey,
+    agentBPrivateKey: agentBKey,
+    agentAName: agentA.name,
+    agentBName: agentB.name,
+    treasuryAddress,
+    cUSDAddress: CUSD_ADDRESS,
+    amountUSD: DATE_COST_USD_STR,
+  });
 
   // 3. Plan the date (image + metadata — payment already done)
   let plan: Awaited<ReturnType<typeof agentCall>>;

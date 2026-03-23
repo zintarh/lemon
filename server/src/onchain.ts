@@ -280,50 +280,81 @@ const erc20TransferAbi = parseAbi([
 
 /**
  * Transfers cUSD directly from an agent wallet to the Lemon treasury.
- * Much simpler than x402 for server-controlled wallets — no HTTP roundtrip.
+ * Checks balance upfront and throws a clear, user-readable error if insufficient.
  * SPLIT: both agents pay half in parallel.
  */
 export async function collectPayment(params: {
   payerMode: "AGENT_A" | "AGENT_B" | "SPLIT";
   agentAPrivateKey: `0x${string}`;
   agentBPrivateKey: `0x${string}`;
+  agentAName: string;
+  agentBName: string;
   treasuryAddress: Address;
   cUSDAddress: Address;
   amountUSD: string; // e.g. "1.00"
 }): Promise<void> {
-  const { payerMode, agentAPrivateKey, agentBPrivateKey, treasuryAddress, cUSDAddress, amountUSD } = params;
+  const { payerMode, agentAPrivateKey, agentBPrivateKey, agentAName, agentBName, treasuryAddress, cUSDAddress, amountUSD } = params;
+  const { formatUnits, parseUnits: pu } = await import("viem");
+  const { privateKeyToAddress } = await import("viem/accounts");
 
-  async function transfer(fromKey: `0x${string}`, amount: string): Promise<void> {
-    const addr = (await import("viem/accounts")).privateKeyToAddress(fromKey);
-    const { formatUnits } = await import("viem");
+  async function transfer(fromKey: `0x${string}`, agentName: string, amount: string): Promise<void> {
+    const addr = privateKeyToAddress(fromKey);
+    const needed = pu(amount, 18);
     const [cUSDBalance, celoBalance] = await Promise.all([
       publicClient.readContract({ address: cUSDAddress, abi: erc20TransferAbi, functionName: "balanceOf", args: [addr] }),
       publicClient.getBalance({ address: addr }),
     ]);
-    console.log(`[payment] agent wallet: ${addr}`);
-    console.log(`[payment]   cUSD balance: ${formatUnits(cUSDBalance, 18)} (needs: ${amount})`);
-    console.log(`[payment]   CELO balance (gas): ${formatUnits(celoBalance, 18)}`);
+
+    console.log(`[payment] ${agentName} (${addr})`);
+    console.log(`[payment]   cUSD: ${formatUnits(cUSDBalance, 18)} (needs ${amount})`);
+    console.log(`[payment]   CELO (gas): ${formatUnits(celoBalance, 18)}`);
+
+    if (cUSDBalance < needed) {
+      const has = parseFloat(formatUnits(cUSDBalance, 18)).toFixed(2);
+      throw new Error(
+        `${agentName}'s wallet doesn't have enough cUSD to pay for this date. ` +
+        `Has ${has} cUSD, needs ${amount} cUSD. Fund ${addr} with cUSD on Celo to continue.`
+      );
+    }
 
     const client = createAgentWalletClient(fromKey);
     const hash = await client.writeContract({
       address: cUSDAddress,
       abi: erc20TransferAbi,
       functionName: "transfer",
-      args: [treasuryAddress, parseUnits(amount, 18)],
+      args: [treasuryAddress, needed],
     });
     await publicClient.waitForTransactionReceipt({ hash });
-    console.log(`[payment] ✓ ${amount} cUSD transferred from ${addr} → treasury`);
+    console.log(`[payment] ✓ ${amount} cUSD paid by ${agentName}`);
   }
 
   if (payerMode === "SPLIT") {
     const half = (parseFloat(amountUSD) / 2).toFixed(6);
+    // Check both balances before attempting either transfer
+    const addrA = privateKeyToAddress(agentAPrivateKey);
+    const addrB = privateKeyToAddress(agentBPrivateKey);
+    const [balA, balB] = await Promise.all([
+      publicClient.readContract({ address: cUSDAddress, abi: erc20TransferAbi, functionName: "balanceOf", args: [addrA] }),
+      publicClient.readContract({ address: cUSDAddress, abi: erc20TransferAbi, functionName: "balanceOf", args: [addrB] }),
+    ]);
+    const needed = parseUnits(half, 18);
+    const shortfalls: string[] = [];
+    if (balA < needed) shortfalls.push(`${agentAName} (has ${parseFloat(formatUnits(balA, 18)).toFixed(2)} cUSD, needs ${half})`);
+    if (balB < needed) shortfalls.push(`${agentBName} (has ${parseFloat(formatUnits(balB, 18)).toFixed(2)} cUSD, needs ${half})`);
+    if (shortfalls.length > 0) {
+      throw new Error(
+        `Not enough cUSD to split the date cost: ${shortfalls.join(" and ")}. ` +
+        `Fund the agent wallet(s) on Celo to continue.`
+      );
+    }
     await Promise.all([
-      transfer(agentAPrivateKey, half),
-      transfer(agentBPrivateKey, half),
+      transfer(agentAPrivateKey, agentAName, half),
+      transfer(agentBPrivateKey, agentBName, half),
     ]);
   } else {
     const payerKey = payerMode === "AGENT_A" ? agentAPrivateKey : agentBPrivateKey;
-    await transfer(payerKey, amountUSD);
+    const payerName = payerMode === "AGENT_A" ? agentAName : agentBName;
+    await transfer(payerKey, payerName, amountUSD);
   }
 }
 
@@ -402,16 +433,34 @@ export async function getAgentProfile(wallet: Address): Promise<AgentProfile> {
 }
 
 /**
- * Sends a small CELO drip from the deployer wallet to the agent's operator wallet
- * so it can pay gas for bookDate, mintNFT, completeDate transactions.
- * Amount: 0.05 CELO — enough for ~100 transactions at normal gas prices.
+ * Funds a new agent wallet with CELO (gas) and cUSD (date payments).
+ * Called once at agent registration time from the treasury/deployer wallet.
+ *  - 0.1 CELO  → covers ~100+ on-chain transactions
+ *  - 2.00 cUSD → covers up to 2 dates (or 4 split dates)
  */
 export async function fundAgentWallet(agentWalletAddress: Address): Promise<void> {
-  const DRIP_AMOUNT = BigInt("100000000000000000"); // 0.1 CELO in wei
-  const hash = await walletClient.sendTransaction({
+  const isTestnet = process.env.NETWORK === "testnet";
+  const cUSDAddress = (
+    isTestnet
+      ? "0xdE9e4C3ce781b4bA68120d6261cbad65ce0aB00b"
+      : "0x765DE816845861e75A25fCA122bb6898B8B1282a"
+  ) as Address;
+
+  // 1. Send CELO for gas
+  const celoHash = await walletClient.sendTransaction({
     to: agentWalletAddress,
-    value: DRIP_AMOUNT,
+    value: BigInt("100000000000000000"), // 0.1 CELO
   });
-  await publicClient.waitForTransactionReceipt({ hash });
-  console.log(`[onchain] Funded agent wallet ${agentWalletAddress} with 0.1 CELO`);
+  await publicClient.waitForTransactionReceipt({ hash: celoHash });
+  console.log(`[onchain] Funded agent wallet ${agentWalletAddress} with 0.1 CELO (gas)`);
+
+  // 2. Send cUSD for date payments
+  const cusdHash = await walletClient.writeContract({
+    address: cUSDAddress,
+    abi: erc20TransferAbi,
+    functionName: "transfer",
+    args: [agentWalletAddress, parseUnits("2", 18)], // 2 cUSD
+  });
+  await publicClient.waitForTransactionReceipt({ hash: cusdHash });
+  console.log(`[onchain] Funded agent wallet ${agentWalletAddress} with 2.00 cUSD`);
 }
