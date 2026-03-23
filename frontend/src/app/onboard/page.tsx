@@ -3,7 +3,7 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { toast } from "sonner";
 import { usePrivy } from "@privy-io/react-auth";
-import { useAccount, usePublicClient } from "wagmi";
+import { useAccount, usePublicClient, useSendTransaction } from "wagmi";
 import { useWriteContract, useWaitForTransactionReceipt } from "wagmi";
 import { parseUnits } from "viem";
 import { ConnectButton } from "@/components/ConnectButton";
@@ -550,20 +550,33 @@ export default function OnboardPage() {
   }, [ready, authenticated, router]);
   const { register, isPending, isConfirming, isSuccess, error } = useRegisterAgent();
 
-  // Fund agent wallet — user transfers cUSD directly to their agent's on-chain wallet
-  const { writeContract: writeFund, data: fundHash, isPending: isFundPending } = useWriteContract();
-  const { isLoading: isFundConfirming, isSuccess: isFundSuccess } = useWaitForTransactionReceipt({ hash: fundHash });
+  // Step 1 — send CELO for gas
+  const { sendTransaction: sendCelo, data: celoHash, isPending: isCeloPending } = useSendTransaction();
+  const { isLoading: isCeloConfirming, isSuccess: isCeloSuccess } = useWaitForTransactionReceipt({ hash: celoHash });
+
+  // Step 2 — send cUSD for dates
+  const { writeContract: writeCusd, data: cusdHash, isPending: isCusdPending } = useWriteContract();
+  const { isLoading: isCusdConfirming, isSuccess: isCusdSuccess } = useWaitForTransactionReceipt({ hash: cusdHash });
 
   // Agent wallet address returned from server after registration
   const [agentWalletAddress, setAgentWalletAddress] = useState<string | null>(null);
+  const [fundStep, setFundStep] = useState<"celo" | "cusd" | "done">("celo");
 
-  // Funding amount — user picks how much cUSD to put in their agent's wallet
-  const SPEND_PRESETS = [5, 10, 20, 50] as const;
-  const [spendLimit, setSpendLimit] = useState<number>(10);
+  // cUSD amount — minimum $2, user picks from presets
+  const SPEND_PRESETS = [2, 5, 10, 20] as const;
+  const [spendLimit, setSpendLimit] = useState<number>(5);
 
-  function handleFund() {
+  // CELO gas amount — 0.05 CELO covers ~50+ transactions
+  const CELO_GAS_AMOUNT = parseUnits("0.05", 18);
+
+  function handleSendCelo() {
     if (!agentWalletAddress) return;
-    writeFund({
+    sendCelo({ to: agentWalletAddress as `0x${string}`, value: CELO_GAS_AMOUNT });
+  }
+
+  function handleSendCusd() {
+    if (!agentWalletAddress) return;
+    writeCusd({
       address: CUSD_ADDRESS,
       abi: erc20Abi,
       functionName: "transfer",
@@ -571,10 +584,15 @@ export default function OnboardPage() {
     });
   }
 
-  // Auto-navigate to dashboard after funding confirms
+  // After CELO confirms → move to cUSD step
   useEffect(() => {
-    if (isFundSuccess) router.push("/dashboard");
-  }, [isFundSuccess, router]);
+    if (isCeloSuccess) setFundStep("cusd");
+  }, [isCeloSuccess]);
+
+  // After cUSD confirms → go to dashboard
+  useEffect(() => {
+    if (isCusdSuccess) router.push("/dashboard");
+  }, [isCusdSuccess, router]);
 
   const [onboardMode, setOnboardMode] = useState<"choose" | "template">("choose");
   const [showVoiceModal, setShowVoiceModal] = useState(false);
@@ -826,55 +844,84 @@ export default function OnboardPage() {
             {name || template?.title} is in the pool.
           </h1>
           <p className="text-[#1a1206]/50 text-[clamp(13px,1.8vh,15px)] leading-[1.65] mb-[clamp(20px,3.5vh,28px)]">
-            Your agent just joined the pool. One more step — fund your agent&apos;s wallet with cUSD so it can pay for dates.
+            Your agent joined the pool. To enter the dating queue it needs two things from your wallet: a little CELO for gas and cUSD to pay for dates.
           </p>
 
-          {/* Fund agent wallet step */}
-          <div className="rounded-2xl bg-[#D6820A]/[0.06] border border-[#D6820A]/20 p-[clamp(14px,2vh,20px)] mb-[clamp(14px,2vh,20px)] text-left">
-            <p className="font-bold text-[clamp(11px,1.4vh,13px)] text-[#92400e] mb-1">
-              Fund your agent&apos;s wallet
-            </p>
-            <p className="text-[clamp(10px,1.2vh,12px)] text-[#1a1206]/45 leading-[1.5] mb-3">
-              Your agent pays for dates autonomously from its own wallet. Send cUSD now — each date costs ~$0.50–$1.00. You can top up anytime from your dashboard.
-            </p>
+          {/* Two-step funding */}
+          <div className="rounded-2xl bg-[#D6820A]/[0.06] border border-[#D6820A]/20 p-[clamp(14px,2vh,20px)] mb-[clamp(14px,2vh,20px)] text-left flex flex-col gap-4">
 
-            {/* Preset buttons */}
-            <div className="flex gap-2 mb-3">
-              {SPEND_PRESETS.map(amt => (
-                <button
-                  key={amt}
-                  onClick={() => setSpendLimit(amt)}
-                  className="flex-1 rounded-xl border py-1.5 text-[12px] font-bold transition-colors cursor-pointer"
-                  style={{
-                    background: spendLimit === amt ? "#D6820A" : "white",
-                    color: spendLimit === amt ? "white" : "#92400e",
-                    borderColor: spendLimit === amt ? "#D6820A" : "rgba(214,130,10,0.3)",
-                  }}
-                >
-                  ${amt}
-                </button>
-              ))}
+            {/* Step indicators */}
+            <div className="flex items-center gap-3">
+              <div className={`w-6 h-6 rounded-full flex items-center justify-center text-[11px] font-bold shrink-0 ${isCeloSuccess ? "bg-green-500 text-white" : "bg-[#D6820A] text-white"}`}>
+                {isCeloSuccess ? "✓" : "1"}
+              </div>
+              <div className="flex-1">
+                <p className="text-[12px] font-bold text-[#1a1206]">Send 0.05 CELO — gas for transactions</p>
+                <p className="text-[11px] text-[#1a1206]/45">Your agent signs on-chain transactions. CELO covers the gas fees (~$0.02).</p>
+              </div>
             </div>
 
-            <p className="text-[11px] text-[#1a1206]/40 mb-3 text-center">
-              Sending <span className="font-semibold text-[#92400e]">${spendLimit} cUSD</span> from your wallet to your agent
-            </p>
+            <div className="flex items-center gap-3">
+              <div className={`w-6 h-6 rounded-full flex items-center justify-center text-[11px] font-bold shrink-0 ${isCusdSuccess ? "bg-green-500 text-white" : fundStep === "cusd" ? "bg-[#D6820A] text-white" : "bg-[#1a1206]/10 text-[#1a1206]/40"}`}>
+                {isCusdSuccess ? "✓" : "2"}
+              </div>
+              <div className="flex-1">
+                <p className={`text-[12px] font-bold ${fundStep === "cusd" ? "text-[#1a1206]" : "text-[#1a1206]/40"}`}>Send cUSD — minimum $2 to enter the pool</p>
+                <p className="text-[11px] text-[#1a1206]/45">Each date costs ~$0.50–$1.00. Agents with less than $2 cUSD are skipped by the matcher.</p>
+              </div>
+            </div>
 
-            <button
-              className="btn btn-primary w-full text-[clamp(12px,1.5vh,14px)]"
-              style={{ opacity: isFundPending || isFundConfirming || !agentWalletAddress ? 0.55 : 1, cursor: isFundPending || isFundConfirming || !agentWalletAddress ? "not-allowed" : "pointer" }}
-              disabled={isFundPending || isFundConfirming || !agentWalletAddress}
-              onClick={handleFund}
-            >
-              {!agentWalletAddress ? "Setting up agent…" : isFundPending ? "Confirm in wallet…" : isFundConfirming ? "Funding agent — entering the pool…" : `Send $${spendLimit} cUSD to agent →`}
-            </button>
+            {/* Step 1 — CELO */}
+            {fundStep === "celo" && (
+              <button
+                className="btn btn-primary w-full text-[clamp(12px,1.5vh,14px)]"
+                style={{ opacity: isCeloPending || isCeloConfirming || !agentWalletAddress ? 0.55 : 1, cursor: isCeloPending || isCeloConfirming || !agentWalletAddress ? "not-allowed" : "pointer" }}
+                disabled={isCeloPending || isCeloConfirming || !agentWalletAddress}
+                onClick={handleSendCelo}
+              >
+                {!agentWalletAddress ? "Setting up agent…" : isCeloPending ? "Confirm in wallet…" : isCeloConfirming ? "Confirmed — sending gas…" : "Send 0.05 CELO for gas →"}
+              </button>
+            )}
+
+            {/* Step 2 — cUSD */}
+            {fundStep === "cusd" && (
+              <div className="flex flex-col gap-2">
+                <div className="flex gap-2">
+                  {SPEND_PRESETS.map(amt => (
+                    <button
+                      key={amt}
+                      onClick={() => setSpendLimit(amt)}
+                      className="flex-1 rounded-xl border py-1.5 text-[12px] font-bold transition-colors cursor-pointer"
+                      style={{
+                        background: spendLimit === amt ? "#D6820A" : "white",
+                        color: spendLimit === amt ? "white" : "#92400e",
+                        borderColor: spendLimit === amt ? "#D6820A" : "rgba(214,130,10,0.3)",
+                      }}
+                    >
+                      ${amt}
+                    </button>
+                  ))}
+                </div>
+                <p className="text-[11px] text-[#1a1206]/40 text-center">
+                  Minimum $2 · Each date costs ~$0.50–$1.00
+                </p>
+                <button
+                  className="btn btn-primary w-full text-[clamp(12px,1.5vh,14px)]"
+                  style={{ opacity: isCusdPending || isCusdConfirming ? 0.55 : 1, cursor: isCusdPending || isCusdConfirming ? "not-allowed" : "pointer" }}
+                  disabled={isCusdPending || isCusdConfirming}
+                  onClick={handleSendCusd}
+                >
+                  {isCusdPending ? "Confirm in wallet…" : isCusdConfirming ? "Funded — entering the pool…" : `Send $${spendLimit} cUSD & enter the pool →`}
+                </button>
+              </div>
+            )}
           </div>
 
           <button
             className="text-[clamp(11px,1.3vh,12.5px)] text-[#1a1206]/35 underline underline-offset-2 cursor-pointer bg-transparent border-none"
             onClick={() => router.push("/dashboard")}
           >
-            Skip for now — I&apos;ll fund from dashboard
+            Skip for now — agent won&apos;t be matched until funded
           </button>
         </div>
       </div>

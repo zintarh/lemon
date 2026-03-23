@@ -66,8 +66,20 @@ const server = http.createServer(async (req, res) => {
 
   try {
     const isHealthGet = req.method === "GET" && url.pathname === "/health";
-    if (!isHealthGet && !internalAuthOk(req)) {
+    const isRootGet = req.method === "GET" && (url.pathname === "/" || url.pathname === "");
+    // Public: health + bare root (so opening the Railway URL in a browser isn’t a scary 401).
+    const isPublicGet = isHealthGet || isRootGet;
+    if (!isPublicGet && !internalAuthOk(req)) {
       return json(res, 401, { error: "Unauthorized" });
+    }
+
+    // ── GET / ────────────────────────────────────────────────────────────────
+    if (isRootGet) {
+      return json(res, 200, {
+        service: "lemon-agent",
+        message: "This URL is for your Lemon backend only (match, conversation, plan-date).",
+        health: "/health",
+      });
     }
 
     // ── GET /health ──────────────────────────────────────────────────────────

@@ -59,7 +59,7 @@ import {
   dbCountCompletedDatesBetween,
   supabase,
 } from "./db.js";
-import { isAddress, type Address, type Hash } from "viem";
+import { isAddress, parseAbi, parseUnits, formatUnits, type Address, type Hash } from "viem";
 import { requireInternalSecret, warnIfInternalSecretUnset } from "./internalAuth.js";
 
 const app = express();
@@ -157,12 +157,7 @@ app.post("/api/agents/register", async (req: Request, res: Response) => {
       void setOperatorKey(raw.wallet, agentWallet.address)
         .then(() => console.log(`[server] Operator key set: ${raw!.wallet} → ${agentWallet.address}`))
         .catch((e) => console.error("[server] setOperatorKey failed (non-fatal):", e.message));
-      // Fund first, then ERC-8004 registration needs the gas
-      try {
-        await fundAgentWallet(agentWallet.address);
-      } catch (e) {
-        console.error("[server] fundAgentWallet failed (non-fatal):", (e as Error).message);
-      }
+      // Agent wallet funded by user during onboarding — no deployer funding
     }
 
     // ── 3. ERC-8004 registration (best-effort, 10s timeout) ──────────────────
@@ -911,17 +906,8 @@ app.post("/api/agents/:wallet/register-identity", async (req: Request, res: Resp
       return;
     }
 
-    // Fund the agent wallet if it has no gas (happens when initial funding tx
-    // hadn't confirmed yet at the time the first ERC-8004 attempt ran)
     const agentAddress = (await import("viem/accounts"))
       .privateKeyToAccount(agent.agent_private_key as `0x${string}`).address;
-    const balance = await publicClient.getBalance({ address: agentAddress });
-    const MIN_GAS_BALANCE = BigInt("80000000000000000"); // 0.08 CELO — enough for ERC-8004 + headroom
-    if (balance < MIN_GAS_BALANCE) {
-      console.log(`[server] Agent wallet ${agentAddress} balance ${balance} < 0.08 CELO — topping up…`);
-      await fundAgentWallet(agentAddress);
-      console.log(`[server] Agent wallet topped up to 0.1 CELO`);
-    }
 
     const agentId = await registerERC8004Agent({
       wallet: agent.wallet,
@@ -1070,14 +1056,45 @@ async function runMatchingCycleGuarded() {
 
 async function runMatchingCycle() {
   try {
-    const agents = await dbGetAllActiveAgents();
+    const allAgents = await dbGetAllActiveAgents();
 
-    if (agents.length < 2) {
-      console.log(`[matcher] Skipping — only ${agents.length} agent(s) registered (need ≥ 2 to match).`);
+    if (allAgents.length < 2) {
+      console.log(`[matcher] Skipping — only ${allAgents.length} agent(s) registered (need ≥ 2 to match).`);
       return;
     }
 
-    console.log(`[matcher] Running match cycle for ${agents.length} agents…`);
+    // Filter out agents whose wallets have less than 2 cUSD — they can't pay for a date
+    const MIN_CUSD = parseUnits("2", 18);
+    const { privateKeyToAddress } = await import("viem/accounts");
+    const fundedAgents: typeof allAgents = [];
+    for (const a of allAgents) {
+      if (!a.agent_private_key) continue;
+      try {
+        const addr = privateKeyToAddress(a.agent_private_key as `0x${string}`);
+        const bal = await publicClient.readContract({
+          address: CUSD_ADDRESS,
+          abi: parseAbi(["function balanceOf(address) view returns (uint256)"]),
+          functionName: "balanceOf",
+          args: [addr],
+        });
+        if (bal >= MIN_CUSD) {
+          fundedAgents.push(a);
+        } else {
+          console.log(`[matcher] Skipping ${a.name} (${a.wallet.slice(0, 8)}) — agent wallet has ${formatUnits(bal, 18)} cUSD (needs ≥ 2)`);
+        }
+      } catch {
+        // Can't check balance — exclude to be safe
+      }
+    }
+
+    const agents = fundedAgents;
+
+    if (agents.length < 2) {
+      console.log(`[matcher] Skipping — only ${agents.length} funded agent(s) in pool (need ≥ 2 with ≥ 2 cUSD).`);
+      return;
+    }
+
+    console.log(`[matcher] Running match cycle for ${agents.length} funded agents (${allAgents.length - agents.length} skipped — low balance)…`);
 
     const profiles = agents.map((a) => ({
       wallet: a.wallet,
