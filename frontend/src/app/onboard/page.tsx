@@ -550,28 +550,31 @@ export default function OnboardPage() {
   }, [ready, authenticated, router]);
   const { register, isPending, isConfirming, isSuccess, error } = useRegisterAgent();
 
-  // ERC-20 approve hook — called after registration to let LemonDate pull cUSD from user wallet
-  const { writeContract: writeApprove, data: approveHash, isPending: isApprovePending } = useWriteContract();
-  const { isLoading: isApproveConfirming, isSuccess: isApproveSuccess } = useWaitForTransactionReceipt({ hash: approveHash });
+  // Fund agent wallet — user transfers cUSD directly to their agent's on-chain wallet
+  const { writeContract: writeFund, data: fundHash, isPending: isFundPending } = useWriteContract();
+  const { isLoading: isFundConfirming, isSuccess: isFundSuccess } = useWaitForTransactionReceipt({ hash: fundHash });
 
-  // Spending cap — user picks how much cUSD their agent can spend (default $20)
+  // Agent wallet address returned from server after registration
+  const [agentWalletAddress, setAgentWalletAddress] = useState<string | null>(null);
+
+  // Funding amount — user picks how much cUSD to put in their agent's wallet
   const SPEND_PRESETS = [5, 10, 20, 50] as const;
-  const [spendLimit, setSpendLimit] = useState<number>(20);
+  const [spendLimit, setSpendLimit] = useState<number>(10);
 
-  function handleApprove() {
-    // cUSD has 18 decimals on Celo
-    writeApprove({
+  function handleFund() {
+    if (!agentWalletAddress) return;
+    writeFund({
       address: CUSD_ADDRESS,
       abi: erc20Abi,
-      functionName: "approve",
-      args: [LEMON_DATE_ADDRESS, parseUnits(spendLimit.toString(), 18)],
+      functionName: "transfer",
+      args: [agentWalletAddress as `0x${string}`, parseUnits(spendLimit.toString(), 18)],
     });
   }
 
-  // Auto-navigate to dashboard after approve confirms — no manual click needed
+  // Auto-navigate to dashboard after funding confirms
   useEffect(() => {
-    if (isApproveSuccess) router.push("/dashboard");
-  }, [isApproveSuccess, router]);
+    if (isFundSuccess) router.push("/dashboard");
+  }, [isFundSuccess, router]);
 
   const [onboardMode, setOnboardMode] = useState<"choose" | "template">("choose");
   const [showVoiceModal, setShowVoiceModal] = useState(false);
@@ -736,7 +739,11 @@ export default function OnboardPage() {
           });
           clearTimeout(timeout);
           if (r.ok) {
-            if (!cancelled) setIsServerRegistered(true);
+            const data = await r.json().catch(() => ({}));
+            if (!cancelled) {
+              setIsServerRegistered(true);
+              if (data.agent_wallet) setAgentWalletAddress(data.agent_wallet);
+            }
           } else {
             // Server error but tx succeeded — log and still advance
             const err = await r.json().catch(() => ({}));
@@ -819,16 +826,16 @@ export default function OnboardPage() {
             {name || template?.title} is in the pool.
           </h1>
           <p className="text-[#1a1206]/50 text-[clamp(13px,1.8vh,15px)] leading-[1.65] mb-[clamp(20px,3.5vh,28px)]">
-            Your agent just joined the pool. One more step — approve your agent to pay for dates on your behalf.
+            Your agent just joined the pool. One more step — fund your agent&apos;s wallet with cUSD so it can pay for dates.
           </p>
 
-          {/* Approve step — auto-navigates to dashboard on confirm */}
+          {/* Fund agent wallet step */}
           <div className="rounded-2xl bg-[#D6820A]/[0.06] border border-[#D6820A]/20 p-[clamp(14px,2vh,20px)] mb-[clamp(14px,2vh,20px)] text-left">
             <p className="font-bold text-[clamp(11px,1.4vh,13px)] text-[#92400e] mb-1">
-              One last step — set your agent&apos;s spending limit
+              Fund your agent&apos;s wallet
             </p>
             <p className="text-[clamp(10px,1.2vh,12px)] text-[#1a1206]/45 leading-[1.5] mb-3">
-              Choose how much cUSD your agent can spend on dates. You keep full control — increase or revoke anytime.
+              Your agent pays for dates autonomously from its own wallet. Send cUSD now — each date costs ~$0.50–$1.00. You can top up anytime from your dashboard.
             </p>
 
             {/* Preset buttons */}
@@ -850,16 +857,16 @@ export default function OnboardPage() {
             </div>
 
             <p className="text-[11px] text-[#1a1206]/40 mb-3 text-center">
-              Approving <span className="font-semibold text-[#92400e]">${spendLimit} cUSD</span> — your wallet stays yours
+              Sending <span className="font-semibold text-[#92400e]">${spendLimit} cUSD</span> from your wallet to your agent
             </p>
 
             <button
               className="btn btn-primary w-full text-[clamp(12px,1.5vh,14px)]"
-              style={{ opacity: isApprovePending || isApproveConfirming ? 0.55 : 1, cursor: isApprovePending || isApproveConfirming ? "not-allowed" : "pointer" }}
-              disabled={isApprovePending || isApproveConfirming}
-              onClick={handleApprove}
+              style={{ opacity: isFundPending || isFundConfirming || !agentWalletAddress ? 0.55 : 1, cursor: isFundPending || isFundConfirming || !agentWalletAddress ? "not-allowed" : "pointer" }}
+              disabled={isFundPending || isFundConfirming || !agentWalletAddress}
+              onClick={handleFund}
             >
-              {isApprovePending ? "Confirm in wallet…" : isApproveConfirming ? "Activated — entering the pool…" : `Approve $${spendLimit} & enter the pool →`}
+              {!agentWalletAddress ? "Setting up agent…" : isFundPending ? "Confirm in wallet…" : isFundConfirming ? "Funding agent — entering the pool…" : `Send $${spendLimit} cUSD to agent →`}
             </button>
           </div>
 
@@ -867,7 +874,7 @@ export default function OnboardPage() {
             className="text-[clamp(11px,1.3vh,12.5px)] text-[#1a1206]/35 underline underline-offset-2 cursor-pointer bg-transparent border-none"
             onClick={() => router.push("/dashboard")}
           >
-            I'll do this later
+            Skip for now — I&apos;ll fund from dashboard
           </button>
         </div>
       </div>

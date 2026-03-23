@@ -533,29 +533,15 @@ export async function getAgentProfile(wallet: Address): Promise<AgentProfile> {
  *  - 0.1 CELO  → covers ~100+ on-chain transactions
  *  - 2.00 cUSD → covers up to 2 dates (or 4 split dates)
  */
+/**
+ * Sends a small CELO drip from the deployer to the agent wallet for gas only.
+ * cUSD for date payments comes from the user's own wallet during onboarding.
+ */
 export async function fundAgentWallet(agentWalletAddress: Address): Promise<void> {
-  const isTestnet = process.env.NETWORK === "testnet";
-  const cUSDAddress = (
-    isTestnet
-      ? "0xdE9e4C3ce781b4bA68120d6261cbad65ce0aB00b"
-      : "0x765DE816845861e75A25fCA122bb6898B8B1282a"
-  ) as Address;
-
-  // 1. Send CELO for gas
   const celoHash = await walletClient.sendTransaction({
     to: agentWalletAddress,
-    value: BigInt("100000000000000000"), // 0.1 CELO
+    value: BigInt("50000000000000000"), // 0.05 CELO — enough for ~50+ transactions
   });
   await publicClient.waitForTransactionReceipt({ hash: celoHash });
-  console.log(`[onchain] Funded agent wallet ${agentWalletAddress} with 0.1 CELO (gas)`);
-
-  // 2. Send cUSD for date payments
-  const cusdHash = await walletClient.writeContract({
-    address: cUSDAddress,
-    abi: erc20TransferAbi,
-    functionName: "transfer",
-    args: [agentWalletAddress, parseUnits("2", 18)], // 2 cUSD
-  });
-  await publicClient.waitForTransactionReceipt({ hash: cusdHash });
-  console.log(`[onchain] Funded agent wallet ${agentWalletAddress} with 2.00 cUSD`);
+  console.log(`[onchain] Funded agent wallet ${agentWalletAddress} with 0.05 CELO (gas only)`);
 }

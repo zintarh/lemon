@@ -33,6 +33,7 @@ export const lemonDateAbi = parseAbi([
 // ERC-20 approve ABI — used at registration to let LemonDate pull payment from user wallets
 export const erc20Abi = parseAbi([
   "function approve(address spender, uint256 amount) returns (bool)",
+  "function transfer(address to, uint256 amount) returns (bool)",
   "function allowance(address owner, address spender) view returns (uint256)",
   "function balanceOf(address account) view returns (uint256)",
 ]);
