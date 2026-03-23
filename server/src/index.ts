@@ -305,62 +305,12 @@ app.post("/api/agents/register", async (req: Request, res: Response) => {
       // Agent wallet funded by user during onboarding — no deployer funding
     }
 
-    // ── 3. ERC-8004 registration (robust) ─────────────────────────────────────
-    // IMPORTANT: do not drop late results. A previous 10s timeout caused many agents
-    // to register successfully on-chain but never persist id/URI in DB.
-    const fallbackErc8004Id = existing?.erc8004_agent_id
+    // ── 3. Identity status only (no ERC-8004 write here) ──────────────────────
+    // ERC-8004 registration is intentionally deferred to /api/agents/:wallet/register-identity
+    // after the user funds agent gas in onboarding.
+    const erc8004AgentId = existing?.erc8004_agent_id
       ? BigInt(existing.erc8004_agent_id)
       : raw!.erc8004AgentId;
-
-    const erc8004Promise = registerERC8004Agent({
-      wallet: raw.wallet,
-      name: raw.name,
-      agentURI: raw.agentURI,
-      personality: raw.personality,
-      registeredAt: Number(raw.registeredAt),
-      agentPrivateKey: agentPrivateKey,
-      avatarUri: raw.avatarURI,
-    });
-
-    // Persist late completion even if we already replied.
-    erc8004Promise.then(async (lateId) => {
-      try {
-        const latest = await dbGetAgent(raw!.wallet);
-        await dbUpsertAgent({
-          wallet: raw!.wallet.toLowerCase(),
-          name: latest?.name ?? raw!.name,
-          avatar_uri: latest?.avatar_uri ?? raw!.avatarURI,
-          agent_uri: latest?.agent_uri ?? raw!.agentURI,
-          personality: latest?.personality ?? raw!.personality,
-          preferences: latest?.preferences ?? raw!.preferences,
-          deal_breakers: latest?.deal_breakers ?? raw!.dealBreakers,
-          billing_mode: latest?.billing_mode ?? raw!.billingMode,
-          erc8004_agent_id: lateId.toString(),
-          selfclaw_public_key: latest?.selfclaw_public_key ?? "",
-          selfclaw_private_key: latest?.selfclaw_private_key ?? "",
-          selfclaw_session_id: latest?.selfclaw_session_id ?? "",
-          selfclaw_human_id: latest?.selfclaw_human_id ?? "",
-          selfclaw_verified: latest?.selfclaw_verified ?? false,
-          agent_wallet: latest?.agent_wallet ?? agentWalletAddress,
-          agent_private_key: latest?.agent_private_key ?? agentPrivateKey,
-          registered_at: latest?.registered_at ?? Number(raw!.registeredAt),
-          active: latest?.active ?? true,
-          in_pool: latest?.in_pool ?? true,
-          indexed_at: new Date().toISOString(),
-        });
-        console.log(`[server] ERC-8004 late persist complete for ${raw!.wallet}: id=${lateId}`);
-      } catch (e) {
-        console.error("[server] ERC-8004 late persist failed:", (e as Error).message);
-      }
-    }).catch((e) => {
-      console.error("[server] ERC-8004 registration failed (non-fatal):", (e as Error).message);
-    });
-
-    // Wait up to 60s; if still pending, continue onboarding and let late persist update DB.
-    const erc8004AgentId = await Promise.race([
-      erc8004Promise,
-      new Promise<bigint>((resolve) => setTimeout(() => resolve(fallbackErc8004Id), 60_000)),
-    ]);
 
     // ── 4. Write to DB ────────────────────────────────────────────────────────
     await dbUpsertAgent({
@@ -372,7 +322,7 @@ app.post("/api/agents/register", async (req: Request, res: Response) => {
       preferences: raw.preferences,
       deal_breakers: raw.dealBreakers,
       billing_mode: raw.billingMode,
-      erc8004_agent_id: erc8004AgentId.toString(),
+      erc8004_agent_id: erc8004AgentId.toString(), // may be "0" until register-identity step
       // Preserve existing selfclaw fields; updated in background after polling
       selfclaw_public_key: existing?.selfclaw_public_key ?? "",
       selfclaw_private_key: existing?.selfclaw_private_key ?? "",
@@ -1234,6 +1184,21 @@ app.post("/api/agents/:wallet/register-identity", async (req: Request, res: Resp
     const agentAddress = (await import("viem/accounts"))
       .privateKeyToAccount(agent.agent_private_key as `0x${string}`).address;
 
+    // Ensure the agent wallet has enough CELO for ERC-8004 registration gas.
+    const minCeloForIdentity = parseUnits("0.04", 18);
+    const agentBalance = await publicClient.getBalance({ address: agentAddress });
+    if (agentBalance < minCeloForIdentity) {
+      const deficit = minCeloForIdentity - agentBalance;
+      return void res.status(400).json({
+        error: "Insufficient CELO gas for identity registration.",
+        code: "INSUFFICIENT_AGENT_GAS",
+        agentWallet: agentAddress,
+        minRequiredWei: minCeloForIdentity.toString(),
+        currentBalanceWei: agentBalance.toString(),
+        deficitWei: deficit.toString(),
+      });
+    }
+
     const agentId = await registerERC8004Agent({
       wallet: agent.wallet,
       name: agent.name,
@@ -1260,6 +1225,22 @@ app.post("/api/agents/:wallet/retry-erc8004", async (req: Request, res: Response
     if (!agent) return void res.status(404).json({ error: "Agent not found" });
     if (!agent.agent_private_key) {
       return void res.status(400).json({ error: "Agent private key missing — cannot retry ERC-8004" });
+    }
+
+    const agentAddress = (await import("viem/accounts"))
+      .privateKeyToAccount(agent.agent_private_key as `0x${string}`).address;
+    const minCeloForIdentity = parseUnits("0.04", 18);
+    const agentBalance = await publicClient.getBalance({ address: agentAddress });
+    if (agentBalance < minCeloForIdentity) {
+      const deficit = minCeloForIdentity - agentBalance;
+      return void res.status(400).json({
+        error: "Insufficient CELO gas for identity registration.",
+        code: "INSUFFICIENT_AGENT_GAS",
+        agentWallet: agentAddress,
+        minRequiredWei: minCeloForIdentity.toString(),
+        currentBalanceWei: agentBalance.toString(),
+        deficitWei: deficit.toString(),
+      });
     }
 
     const newId = await registerERC8004Agent({
