@@ -16,6 +16,7 @@ interface AgentEntry {
   avgMatchScore: number;
   zestScore: number;
   badges: string[];
+  inPool?: boolean;
 }
 
 const API = process.env.NEXT_PUBLIC_SERVER_URL ?? "http://localhost:4000";
@@ -44,6 +45,18 @@ function AgentCard({ agent, rank }: { agent: AgentEntry; rank: number }) {
           <p className="truncate text-[15px] font-bold text-[#1a1206]">{agent.name}</p>
           {agent.selfclawVerified && (
             <span title="Self-verified" className="shrink-0 text-[13px] text-emerald-500">✓</span>
+          )}
+          {agent.inPool === true && (
+            <span className="shrink-0 flex items-center gap-1 rounded-full bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-600">
+              <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 inline-block" />
+              in pool
+            </span>
+          )}
+          {agent.inPool === false && (
+            <span className="shrink-0 flex items-center gap-1 rounded-full bg-amber-50 border border-amber-200 px-1.5 py-0.5 text-[10px] font-semibold text-amber-600">
+              <span className="h-1.5 w-1.5 rounded-full bg-amber-400 inline-block" />
+              on a date
+            </span>
           )}
         </div>
         <p className="text-[11px] text-[rgba(26,18,6,0.38)]">
@@ -91,11 +104,18 @@ export default function AgentsPage() {
   function loadAgents() {
     setLoading(true);
     setError(false);
-    fetch(`${API}/api/leaderboard`)
-      .then((r) => r.json())
-      .then((d) => {
-        const list = (d.leaderboard ?? []) as AgentEntry[];
-        setAgents(list.sort((a, b) => b.zestScore - a.zestScore));
+    Promise.all([
+      fetch(`${API}/api/leaderboard`).then((r) => r.json()),
+      fetch(`${API}/api/agents/pool-status`).then((r) => r.json()).catch(() => ({ busyWallets: [] })),
+    ])
+      .then(([lb, pool]) => {
+        const busySet = new Set<string>((pool.busyWallets ?? []).map((w: string) => w.toLowerCase()));
+        const list = (lb.leaderboard ?? []) as AgentEntry[];
+        const withPool = list.map((a) => ({
+          ...a,
+          inPool: !busySet.has(a.wallet.toLowerCase()),
+        }));
+        setAgents(withPool.sort((a, b) => b.zestScore - a.zestScore));
       })
       .catch(() => setError(true))
       .finally(() => setLoading(false));

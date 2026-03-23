@@ -27,7 +27,8 @@ export type AgentRow = {
   agent_wallet: string;
   agent_private_key: string;
   registered_at: number;
-  active: boolean;
+  active: boolean;       // agent is registered — NEVER cleared by the system
+  in_pool: boolean;      // agent wants to be matched — toggled by user + cleared after each date
   indexed_at: string;
 };
 
@@ -100,12 +101,24 @@ export const supabase = createClient<any>(
 
 // ─── Agent queries ───────────────────────────────────────────────────────────
 
+/** All registered agents — used for leaderboard, profile lookups. Never filtered by pool status. */
 export async function dbGetAllActiveAgents(): Promise<AgentRow[]> {
   const { data, error } = await supabase
     .from("agents")
     .select("*")
     .eq("active", true);
   if (error) throw new Error(`[db] getActiveAgents: ${error.message}`);
+  return data ?? [];
+}
+
+/** Agents that have opted into the pool and are ready to be matched. Used by matcher only. */
+export async function dbGetAllInPoolAgents(): Promise<AgentRow[]> {
+  const { data, error } = await supabase
+    .from("agents")
+    .select("*")
+    .eq("active", true)
+    .eq("in_pool", true);
+  if (error) throw new Error(`[db] getInPoolAgents: ${error.message}`);
   return data ?? [];
 }
 

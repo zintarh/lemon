@@ -25,17 +25,18 @@ import {
   bookDate,
   cancelDate,
   completeDate,
-  mintNFT,
+  approveMint,
+  getNftTokenIdFromTx,
   resolveNextPayer,
-  collectPayment,
-  checkPaymentBalances,
-  refundPayment,
   generateAgentWallet,
   setOperatorKey,
   ensureOperatorSet,
   fundAgentWallet,
   withdrawFromContract,
+  withdrawFromSpecificContract,
   publicClient,
+  readDateOnchain,
+  ownerOfMemory,
   PaymentShortfallError,
 } from "./onchain.js";
 import { postDateTweet, postDateTweetFromImageUrl } from "./twitter.js";
@@ -45,6 +46,7 @@ import { handleTelegramUpdate, sendIntroMessage, sendRematchSuggestion } from ".
 import { registerERC8004Agent, refreshAgentURI } from "./erc8004.js";
 import {
   dbGetAllActiveAgents,
+  dbGetAllInPoolAgents,
   dbGetAgent,
   dbGetDate,
   dbGetAgentDates,
@@ -65,7 +67,7 @@ import {
   dbCountCompletedDatesBetween,
   supabase,
 } from "./db.js";
-import { isAddress, parseAbi, parseUnits, formatUnits, type Address, type Hash } from "viem";
+import { isAddress, parseAbi, parseUnits, formatUnits, verifyMessage, type Address, type Hash } from "viem";
 import { requireInternalSecret, warnIfInternalSecretUnset } from "./internalAuth.js";
 
 const app = express();
@@ -111,11 +113,27 @@ const TEMPLATE_LABEL_BY_NUM: Record<number, string> = {
   4: "Gallery Walk",
 };
 
+const MINT_AUTH_TTL_MS = 5 * 60 * 1000;
+const mintChallenges = new Map<string, { nonce: string; expiresAt: number }>();
+const mintLocks = new Set<string>();
+const tweetPostLocks = new Set<string>();
+
 function agentHeaders(): Record<string, string> {
   const h: Record<string, string> = { "Content-Type": "application/json" };
   const s = process.env.LEMON_INTERNAL_SECRET;
   if (s) h["X-Lemon-Internal-Secret"] = s;
   return h;
+}
+
+function makeMintChallengeMessage(wallet: string, dateId: string, nonce: string): string {
+  return [
+    "Lemon mint authorization",
+    `wallet:${wallet.toLowerCase()}`,
+    `dateId:${dateId}`,
+    `nonce:${nonce}`,
+    `chainId:${publicClient.chain.id}`,
+    "action:mint-memory",
+  ].join("\n");
 }
 
 function agentCall(path: string, body: unknown) {
@@ -234,7 +252,8 @@ app.post("/api/agents/register", async (req: Request, res: Response) => {
       agent_wallet: agentWalletAddress,
       agent_private_key: agentPrivateKey,
       registered_at: Number(raw.registeredAt),
-      active: raw.active,
+      active: true,
+      in_pool: existing?.in_pool ?? true, // new agents start in pool; preserve opt-out if re-registering
       indexed_at: new Date().toISOString(),
     });
 
@@ -430,11 +449,11 @@ async function performDateBooking(
     try {
       await supabase
         .from("agents")
-        .update({ active: false })
+        .update({ in_pool: false })
         .in("wallet", [walletA.toLowerCase(), walletB.toLowerCase()]);
-      console.log(`[server] agents paused (${reason}): ${walletA.slice(0, 8)} / ${walletB.slice(0, 8)}`);
+      console.log(`[server] agents removed from pool (${reason}): ${walletA.slice(0, 8)} / ${walletB.slice(0, 8)}`);
     } catch (e) {
-      console.warn("[server] auto-pause failed (non-fatal):", (e as Error).message);
+      console.warn("[server] pool pause failed (non-fatal):", (e as Error).message);
     }
   };
 
@@ -560,118 +579,20 @@ async function performDateBooking(
   });
   console.log(`[server] date #${dateId} written to DB (status: ACTIVE)`);
 
-  // 4b. Resolve amount for this template, then check balances before touching money.
-  const amountUSD = TEMPLATE_COST_USD[template] ?? DATE_COST_USD_STR;
-
-  const shortfallErr = await checkPaymentBalances({
-    payerMode: payerMode as "AGENT_A" | "AGENT_B" | "SPLIT",
-    agentAPrivateKey: agentAKey,
-    agentBPrivateKey: agentBKey,
-    agentAName: agentA.name,
-    agentBName: agentB.name,
-    userWalletA: walletA,
-    userWalletB: walletB,
-    cUSDAddress: CUSD_ADDRESS,
-    amountUSD,
-  });
-
-  if (shortfallErr) {
-    // Cancel the on-chain booking so the slot is freed
-    await dbUpdateDate(dateId.toString(), {
-      status: 3,
-      failure_reason: shortfallErr.message,
-      refund_status: "not_charged",
-      refund_note: "No payment collected due to insufficient cUSD balance.",
-    });
-    await cancelDate(dateId).catch((e) =>
-      console.warn("[server] cancelDate after shortfall failed (non-fatal):", (e as Error).message)
-    );
-    await pauseBothAgents("payment_shortfall");
-    console.warn("[server] Payment shortfall detected — saving approval request", shortfallErr.shortfalls.map(s => s.agentName));
-
-    // Persist paymentApproval to transcript so the frontend shows the approval UI
-    if (opts.convoId && shortfallErr.shortfalls.length === 1 && shortfallErr.funded.length === 1) {
-      const short = shortfallErr.shortfalls[0];
-      const funded = shortfallErr.funded[0];
-      const { data: convoRow } = await supabase.from("conversations").select("transcript").eq("id", opts.convoId).single();
-      const t = (convoRow?.transcript as Record<string, unknown>) ?? {};
-      await supabase.from("conversations").update({
-        transcript: {
-          ...t,
-          bookingPending: false,
-          bookingError: null,
-          paymentApproval: {
-            fundedWallet: funded.userWallet,
-            fundedAgentName: funded.agentName,
-            shortWallet: short.userWallet,
-            shortAgentName: short.agentName,
-            shortAgentWalletAddress: short.agentWalletAddress,
-            shortHas: short.has,
-            shortNeeds: short.needs,
-            fullAmountUSD: funded.fullAmountUSD,
-            status: "pending",
-            expiresAt: Date.now() + 30 * 60 * 1000,
-            template,
-            sharedInterests,
-          },
-        },
-      }).eq("id", opts.convoId);
-    }
-
-    throw shortfallErr;
-  }
-
-  // 4c. Collect payment — only after booking is confirmed on-chain.
-  //     Gas is always paid in CELO (no feeCurrency set), never cUSD.
+  // 5. Approve the mint on-chain so either participant can call claimMemory() with fee.
   try {
-    await collectPayment({
-      payerMode: payerMode as "AGENT_A" | "AGENT_B" | "SPLIT",
-      agentAPrivateKey: agentAKey,
-      agentBPrivateKey: agentBKey,
-      agentAName: agentA.name,
-      agentBName: agentB.name,
-      treasuryAddress,
-      cUSDAddress: CUSD_ADDRESS,
-      amountUSD,
+    await approveMint({
+      dateId,
+      metadataURI: plan.metadataURI,
+      agentA: walletA,
+      agentB: walletB,
     });
-  } catch (payErr) {
-    // Booking exists on-chain but payment failed — cancel and attempt refund in case
-    // a partial transfer occurred before the failure.
-    console.error("[server] Payment failed after booking — cancelling date", dateId.toString(), payErr);
-    let refundStatus = "not_needed";
-    let refundNote = "Payment failed before any transfer completed.";
-    try {
-      await refundPayment({
-        payerMode: payerMode as "AGENT_A" | "AGENT_B" | "SPLIT",
-        agentAPrivateKey: agentAKey,
-        agentBPrivateKey: agentBKey,
-        agentAName: agentA.name,
-        agentBName: agentB.name,
-        treasuryAddress,
-        cUSDAddress: CUSD_ADDRESS,
-        amountUSD,
-      });
-      refundStatus = "refunded";
-      refundNote = "Partial payment was detected and refunded.";
-    } catch (refundErr) {
-      refundStatus = "failed";
-      refundNote = `Automatic refund failed: ${(refundErr as Error).message}`;
-    }
-    await dbUpdateDate(dateId.toString(), {
-      status: 3,
-      failure_reason: (payErr as Error).message,
-      refund_status: refundStatus,
-      refund_note: refundNote,
-    });
-    await cancelDate(dateId).catch((e) =>
-      console.warn("[server] cancelDate after payment failure failed (non-fatal):", (e as Error).message)
-    );
-    await pauseBothAgents("payment_failure");
-    throw payErr;
+    console.log(`[server] date #${dateId} mint approved on-chain`);
+  } catch (e) {
+    // Non-fatal — user can still use the admin mint fallback. Log and continue.
+    console.warn(`[server] approveMint failed for date #${dateId} (non-fatal):`, (e as Error).message);
   }
 
-  // 5. Wait for user-triggered mint from dashboard.
-  console.log(`[server] date #${dateId} booked and funded — awaiting user mint`);
   return { dateId: dateId.toString(), metadataURI: plan.metadataURI, imageUrl: plan.imageUrl, requiresUserMint: true };
 }
 
@@ -732,7 +653,7 @@ app.post("/api/date/retry", async (req: Request, res: Response) => {
     // Clear any previous booking error/approval from transcript
     const transcript = (convo.transcript as Record<string, unknown>) ?? {};
     await supabase.from("conversations").update({
-      transcript: { ...transcript, bookingError: null, bookingPending: true, paymentApproval: null },
+      transcript: { ...transcript, bookingError: null, bookingPending: true, bookingReadyToMint: false, paymentApproval: null },
     }).eq("id", convo.id);
 
     // Run booking in background — don't block the HTTP response (canonical pair order from DB)
@@ -748,7 +669,7 @@ app.post("/api/date/retry", async (req: Request, res: Response) => {
         const msg = (err as Error).message;
         console.error("[server] Retry booking failed:", msg);
         await supabase.from("conversations").update({
-          transcript: { ...transcript, bookingError: msg, bookingPending: false },
+          transcript: { ...transcript, bookingError: msg, bookingPending: false, bookingReadyToMint: false },
         }).eq("id", convo.id);
       });
 
@@ -818,6 +739,7 @@ app.post("/api/payment-approval/respond", async (req: Request, res: Response) =>
         ...t,
         paymentApproval: { ...pa, status: "approved" },
         bookingPending: true,
+          bookingReadyToMint: false,
         bookingError: null,
       },
     }).eq("id", convoRow.id);
@@ -842,7 +764,7 @@ app.post("/api/payment-approval/respond", async (req: Request, res: Response) =>
       const msg = (err as Error).message;
       const freshT = (convoRow.transcript as Record<string, unknown>) ?? {};
       await supabase.from("conversations").update({
-        transcript: { ...freshT, bookingPending: false, bookingError: msg, paymentApproval: { ...pa, status: "approved" } },
+        transcript: { ...freshT, bookingPending: false, bookingReadyToMint: false, bookingError: msg, paymentApproval: { ...pa, status: "approved" } },
       }).eq("id", convoRow.id);
     });
   } catch (err) {
@@ -898,47 +820,34 @@ app.post("/api/date/rematch", async (req: Request, res: Response) => {
   }
 });
 
-// ─── GET /api/date/:dateId ────────────────────────────────────────────────────
-
-// ─── POST /api/date/:dateId/mint-memory ──────────────────────────────────────
-// User-triggered mint flow: finalize active booked date -> mint NFT -> complete -> tweet.
-app.post("/api/date/:dateId/mint-memory", async (req: Request, res: Response) => {
+// ─── POST /api/date/:dateId/confirm-mint ─────────────────────────────────────
+// Called by frontend after user's claimMemory() tx is confirmed on-chain.
+// Server verifies the tx, calls completeDate, updates DB, and tweets.
+app.post("/api/date/:dateId/confirm-mint", async (req: Request, res: Response) => {
+  const id = req.params.dateId;
+  if (mintLocks.has(id)) {
+    return void res.status(409).json({ error: "Mint confirmation already in progress" });
+  }
+  mintLocks.add(id);
   try {
-    const id = req.params.dateId;
     const date = await dbGetDate(id);
     if (!date) return void res.status(404).json({ error: "Date not found" });
 
-    const wallet = String((req.body as { wallet?: string })?.wallet ?? "").toLowerCase();
-    if (!wallet || !isAddress(wallet as Address)) {
-      return void res.status(400).json({ error: "wallet must be a valid 0x address" });
-    }
-    if (wallet !== date.agent_a.toLowerCase() && wallet !== date.agent_b.toLowerCase()) {
-      return void res.status(403).json({ error: "Only participants can mint this memory" });
-    }
+    // Idempotent — already confirmed
     if (date.status === 2 && date.nft_token_id) {
       return void res.json({ ok: true, alreadyMinted: true, nftTokenId: date.nft_token_id, tweetUrl: date.tweet_url ?? null });
     }
-    if (date.status !== 1) {
-      return void res.status(400).json({ error: `Date is not active (status=${date.status})` });
+
+    const txHash = String((req.body as { txHash?: string })?.txHash ?? "");
+    if (!txHash || !/^0x[0-9a-fA-F]{64}$/.test(txHash)) {
+      return void res.status(400).json({ error: "txHash is required (0x hex string)" });
     }
 
-    const [agentA, agentB] = await Promise.all([
-      dbGetAgent(date.agent_a),
-      dbGetAgent(date.agent_b),
-    ]);
-    if (!agentA || !agentB || !agentA.agent_private_key) {
-      return void res.status(500).json({ error: "Agent records are incomplete for minting" });
-    }
+    // Extract tokenId from the on-chain DateMemoryMinted event
+    const nftTokenId = await getNftTokenIdFromTx(txHash as `0x${string}`);
+    const owner = await ownerOfMemory(nftTokenId);
 
-    const dateId = BigInt(id);
-    const nftTokenId = await mintNFT({
-      agentA: date.agent_a as Address,
-      agentB: date.agent_b as Address,
-      dateId,
-      metadataURI: date.metadata_uri ?? "ipfs://placeholder",
-      agentPrivateKey: agentA.agent_private_key as `0x${string}`,
-    });
-    await completeDate(dateId, nftTokenId);
+    await completeDate(BigInt(id), nftTokenId);
 
     const completedAt = Math.floor(Date.now() / 1000);
     await dbUpdateDate(id, {
@@ -951,10 +860,10 @@ app.post("/api/date/:dateId/mint-memory", async (req: Request, res: Response) =>
       refund_note: null,
     });
 
-    // Require explicit opt-in for next lifecycle.
+    // Remove from pool — user must explicitly re-enter after each date.
     await supabase
       .from("agents")
-      .update({ active: false })
+      .update({ in_pool: false })
       .in("wallet", [date.agent_a.toLowerCase(), date.agent_b.toLowerCase()]);
 
     // Mark conversation card as done.
@@ -972,26 +881,33 @@ app.post("/api/date/:dateId/mint-memory", async (req: Request, res: Response) =>
       }).eq("id", row.id);
     }
 
-    // Post to X after successful user-triggered mint (non-fatal).
+    // Post to X (non-fatal).
     let tweetUrl: string | null = null;
     try {
-      const templateLabel = TEMPLATE_LABEL_BY_NUM[Number(date.template ?? 0)] ?? "Date";
-      const caption = `Memory minted on Lemon: ${agentA.name} x ${agentB.name} · ${templateLabel} 🍋 #lemondating`;
-      if (date.image_url) {
-        const tweet = await postDateTweetFromImageUrl({ imageUrl: date.image_url, caption });
-        tweetUrl = tweet.tweetUrl;
-        await dbUpdateDate(id, { tweet_url: tweetUrl });
+      const latest = await dbGetDate(id);
+      if (latest?.tweet_url) {
+        tweetUrl = latest.tweet_url;
+      } else {
+        const [agentA, agentB] = await Promise.all([dbGetAgent(date.agent_a), dbGetAgent(date.agent_b)]);
+        const templateLabel = TEMPLATE_LABEL_BY_NUM[Number(date.template ?? 0)] ?? "Date";
+        const caption = `Memory minted on Lemon: ${agentA?.name ?? date.agent_a} x ${agentB?.name ?? date.agent_b} · ${templateLabel} 🍋 #lemondating`;
+        if (date.image_url) {
+          const tweet = await postDateTweetFromImageUrl({ imageUrl: date.image_url, caption });
+          tweetUrl = tweet.tweetUrl;
+          await dbUpdateDate(id, { tweet_url: tweetUrl });
+        }
       }
     } catch (e) {
-      console.warn("[mint-memory] tweet failed (non-fatal):", (e as Error).message);
+      console.warn("[confirm-mint] tweet failed (non-fatal):", (e as Error).message);
     }
 
-    res.json({ ok: true, nftTokenId: nftTokenId.toString(), tweetUrl });
+    res.json({ ok: true, nftTokenId: nftTokenId.toString(), tweetUrl, nftOwner: owner });
   } catch (err) {
-    // If mint flow fails after a payment-booked active date, keep status visible in history.
     const msg = (err as Error).message;
-    console.error("[mint-memory] failed:", msg);
+    console.error("[confirm-mint] failed:", msg);
     res.status(500).json({ error: msg });
+  } finally {
+    mintLocks.delete(id);
   }
 });
 
@@ -1026,7 +942,7 @@ app.get("/api/agents/pool-status", async (_req: Request, res: Response) => {
     const agents = await dbGetAllActiveAgents();
     const { supabase: db } = await import("./db.js");
 
-    // Agents on active/pending dates
+    // Agents on active/pending dates OR in active conversations = busy wallets
     const { data: activeDates } = await db
       .from("dates").select("agent_a, agent_b").in("status", [0, 1]);
     const busyWallets = new Set<string>();
@@ -1034,8 +950,6 @@ app.get("/api/agents/pool-status", async (_req: Request, res: Response) => {
       busyWallets.add(d.agent_a);
       busyWallets.add(d.agent_b);
     }
-
-    // Agents currently in conversation (only count non-stale conversations, ≤90 min old)
     const ninetyMinutesAgo = new Date(Date.now() - 90 * 60 * 1000).toISOString();
     const { data: activeConvos } = await db
       .from("conversations").select("wallet_a, wallet_b")
@@ -1046,16 +960,23 @@ app.get("/api/agents/pool-status", async (_req: Request, res: Response) => {
       busyWallets.add(c.wallet_b);
     }
 
-    // Total completed dates (all-time) — used to show activity even when no active dates
+    // Total completed dates
     const { count: totalDates } = await db
       .from("dates").select("*", { count: "exact", head: true }).eq("status", 2);
 
     const total = agents.length;
     const verified = agents.filter(a => a.selfclaw_verified).length;
+    const inPool = agents.filter(a => a.in_pool && !busyWallets.has(a.wallet)).length;
     const busy = agents.filter(a => busyWallets.has(a.wallet)).length;
-    const available = total - busy;
+    const paused = total - inPool - busy;
 
-    res.json({ total, verified, busy, available, totalDates: totalDates ?? 0, busyWallets: [...busyWallets] });
+    res.json({
+      total, verified, busy, available: inPool, paused,
+      totalDates: totalDates ?? 0,
+      busyWallets: [...busyWallets],
+      // inPool wallets: registered, opted in, and not currently busy
+      inPoolWallets: agents.filter(a => a.in_pool && !busyWallets.has(a.wallet)).map(a => a.wallet),
+    });
   } catch (err) {
     res.status(500).json({ error: (err as Error).message });
   }
@@ -1127,7 +1048,8 @@ app.get("/api/agents/:wallet/dates", async (req: Request, res: Response) => {
 });
 
 // ─── POST /api/agents/:wallet/active ─────────────────────────────────────────
-// Lets the human toggle whether their agent re-enters the matching pool.
+// Lets the human toggle whether their agent is in the matching pool (in_pool).
+// `active` param kept for API backward-compat — maps to in_pool internally.
 
 app.post("/api/agents/:wallet/active", async (req: Request, res: Response) => {
   try {
@@ -1135,9 +1057,9 @@ app.post("/api/agents/:wallet/active", async (req: Request, res: Response) => {
     if (!wallet || !isAddress(wallet)) { res.status(400).json({ error: "Invalid wallet" }); return; }
     const { active } = req.body as { active?: boolean };
     if (typeof active !== "boolean") { res.status(400).json({ error: "active (boolean) required" }); return; }
-    const { error } = await supabase.from("agents").update({ active }).eq("wallet", wallet.toLowerCase());
+    const { error } = await supabase.from("agents").update({ in_pool: active }).eq("wallet", wallet.toLowerCase());
     if (error) throw new Error(error.message);
-    res.json({ ok: true, active });
+    res.json({ ok: true, active, in_pool: active });
   } catch (err) {
     res.status(500).json({ error: (err as Error).message });
   }
@@ -1304,6 +1226,91 @@ app.get("/api/admin/balance", async (req: Request, res: Response) => {
   }
 });
 
+// ─── GET /api/admin/contract-balance ──────────────────────────────────────────
+// Returns ERC-20 balance for any withdraw-capable contract. Protected by ADMIN_SECRET.
+app.get("/api/admin/contract-balance", async (req: Request, res: Response) => {
+  const secret = req.headers["x-admin-secret"] ?? req.query?.adminSecret;
+  if (!process.env.ADMIN_SECRET || secret !== process.env.ADMIN_SECRET) {
+    res.status(403).json({ error: "Forbidden" });
+    return;
+  }
+  try {
+    const defaultToken = process.env.CUSD_ADDRESS ?? "0x765DE816845861e75A25fCA122bb6898B8B1282a";
+    const contract = String(req.query?.contract ?? "").toLowerCase();
+    const token = String(req.query?.token ?? defaultToken).toLowerCase();
+    if (!isAddress(contract as Address)) return void res.status(400).json({ error: "Invalid contract address" });
+    if (!isAddress(token as Address)) return void res.status(400).json({ error: "Invalid token address" });
+    const balance = await publicClient.readContract({
+      address: token as Address,
+      abi: parseAbi(["function balanceOf(address) view returns (uint256)"]),
+      functionName: "balanceOf",
+      args: [contract as Address],
+    }) as bigint;
+    res.json({
+      balance: balance.toString(),
+      balanceFormatted: formatUnits(balance, 18),
+      contract,
+      token,
+      network: process.env.NETWORK ?? "mainnet",
+    });
+  } catch (err: unknown) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// ─── POST /api/admin/withdraw-contract ────────────────────────────────────────
+// Withdraw token balance from a specific contract using owner key.
+app.post("/api/admin/withdraw-contract", async (req: Request, res: Response) => {
+  const secret = req.headers["x-admin-secret"] ?? req.body?.adminSecret;
+  if (!process.env.ADMIN_SECRET || secret !== process.env.ADMIN_SECRET) {
+    res.status(403).json({ error: "Forbidden" });
+    return;
+  }
+  try {
+    const contract = String(req.body?.contract ?? "").toLowerCase();
+    const token = String(req.body?.token ?? (process.env.CUSD_ADDRESS ?? "0x765DE816845861e75A25fCA122bb6898B8B1282a")).toLowerCase();
+    const recipient = String(req.body?.recipient ?? process.env.DEPLOYER_ADDRESS ?? "").toLowerCase();
+    const decimals = Number(req.body?.decimals ?? 18);
+    if (!isAddress(contract as Address)) return void res.status(400).json({ error: "Invalid contract address" });
+    if (!isAddress(token as Address)) return void res.status(400).json({ error: "Invalid token address" });
+    if (!isAddress(recipient as Address)) return void res.status(400).json({ error: "Invalid recipient address" });
+    if (!Number.isInteger(decimals) || decimals < 0 || decimals > 36) {
+      return void res.status(400).json({ error: "Invalid decimals value" });
+    }
+
+    const balance = await publicClient.readContract({
+      address: token as Address,
+      abi: parseAbi(["function balanceOf(address) view returns (uint256)"]),
+      functionName: "balanceOf",
+      args: [contract as Address],
+    }) as bigint;
+    if (balance === 0n) return void res.json({ ok: true, message: "Contract balance is 0 — nothing to withdraw", balance: "0" });
+
+    let amount = balance;
+    if (req.body?.amount && String(req.body.amount).trim() !== "") {
+      amount = parseUnits(String(req.body.amount), decimals);
+      if (amount <= 0n) return void res.status(400).json({ error: "Amount must be > 0" });
+      if (amount > balance) return void res.status(400).json({ error: "Amount exceeds contract token balance" });
+    }
+
+    const hash = await withdrawFromSpecificContract(contract as Address, token as Address, recipient as Address, amount);
+    res.json({
+      ok: true,
+      hash,
+      amount: amount.toString(),
+      amountFormatted: formatUnits(amount, decimals),
+      contract,
+      recipient,
+      token,
+      network: process.env.NETWORK ?? "mainnet",
+    });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[admin/withdraw-contract]", msg);
+    res.status(500).json({ error: msg });
+  }
+});
+
 // ─── POST /api/agents/:wallet/selfclaw/retry ─────────────────────────────────
 // Starts a Self verification session. Returns QR immediately; polls in background.
 
@@ -1434,6 +1441,23 @@ async function cleanupStaleActiveDates() {
     for (const row of staleRows) {
       if (row.needs_user_mint) continue; // waiting for explicit user action, not stale.
       const id = BigInt(row.date_id);
+      const chainDate = await readDateOnchain(id).catch(() => null);
+      if (chainDate && Number(chainDate.status) === 2) {
+        await dbUpdateDate(row.date_id, {
+          status: 2,
+          nft_token_id: chainDate.nftTokenId > 0n ? chainDate.nftTokenId.toString() : null,
+          completed_at: Number(chainDate.completedAt || 0n),
+          needs_user_mint: false,
+          failure_reason: null,
+          refund_status: null,
+          refund_note: null,
+        });
+        continue;
+      }
+      if (chainDate && Number(chainDate.status) === 3) {
+        await dbUpdateDate(row.date_id, { status: 3, needs_user_mint: false });
+        continue;
+      }
       try {
         await cancelDate(id);
       } catch (e) {
@@ -1448,7 +1472,7 @@ async function cleanupStaleActiveDates() {
       });
       await supabase
         .from("agents")
-        .update({ active: false })
+        .update({ in_pool: false })
         .in("wallet", [String(row.agent_a).toLowerCase(), String(row.agent_b).toLowerCase()]);
       console.log(`[cleanup] stale ACTIVE date cancelled: #${row.date_id}`);
     }
@@ -1458,6 +1482,35 @@ async function cleanupStaleActiveDates() {
 }
 
 setInterval(cleanupStaleActiveDates, 5 * 60 * 1000);
+
+// Reconcile DB from chain for cases where tx succeeded but DB write failed.
+async function reconcileDatesFromChainOnce() {
+  try {
+    const { data: rows, error } = await supabase
+      .from("dates")
+      .select("date_id, status, nft_token_id, completed_at, needs_user_mint")
+      .or("and(status.eq.1,needs_user_mint.eq.false),and(status.eq.2,nft_token_id.is.null)")
+      .order("scheduled_at", { ascending: false })
+      .limit(30);
+    if (error) throw new Error(error.message);
+    for (const row of rows ?? []) {
+      const d = await readDateOnchain(BigInt(String(row.date_id))).catch(() => null);
+      if (!d) continue;
+      if (Number(d.status) === 2) {
+        await dbUpdateDate(String(row.date_id), {
+          status: 2,
+          nft_token_id: d.nftTokenId > 0n ? d.nftTokenId.toString() : null,
+          completed_at: Number(d.completedAt || 0n),
+          needs_user_mint: false,
+        });
+      } else if (Number(d.status) === 3 && Number(row.status) !== 3) {
+        await dbUpdateDate(String(row.date_id), { status: 3, needs_user_mint: false });
+      }
+    }
+  } catch (e) {
+    console.warn("[reconcile] cycle error:", (e as Error).message);
+  }
+}
 
 // ─── Matching scheduler ───────────────────────────────────────────────────────
 // Runs a matching attempt every MATCH_INTERVAL_MS. Skips if fewer than 2 agents
@@ -1480,10 +1533,10 @@ async function runMatchingCycleGuarded() {
 
 async function runMatchingCycle() {
   try {
-    const allAgents = await dbGetAllActiveAgents();
+    const allAgents = await dbGetAllInPoolAgents();
 
     if (allAgents.length < 2) {
-      console.log(`[matcher] Skipping — only ${allAgents.length} agent(s) registered (need ≥ 2 to match).`);
+      console.log(`[matcher] Skipping — only ${allAgents.length} agent(s) in pool (need ≥ 2 to match).`);
       return;
     }
 
@@ -1593,7 +1646,7 @@ async function runMatchingCycle() {
           if (convoRow) {
             const existing = (convoRow.transcript as Record<string, unknown>) ?? {};
             await supabase.from("conversations").update({
-              transcript: { ...existing, bookingPending: true, bookingError: null, bookingComplete: false, paymentApproval: null },
+              transcript: { ...existing, bookingPending: true, bookingError: null, bookingReadyToMint: false, bookingComplete: false, paymentApproval: null },
             }).eq("id", convoRow.id);
           }
 
@@ -1622,7 +1675,7 @@ async function runMatchingCycle() {
             if (row) {
               const t = (row.transcript as Record<string, unknown>) ?? {};
               await supabase.from("conversations").update({
-                transcript: { ...t, bookingPending: false, bookingError: msg },
+                transcript: { ...t, bookingPending: false, bookingReadyToMint: false, bookingError: msg },
               }).eq("id", row.id);
             }
           });
@@ -1661,11 +1714,16 @@ async function retryMissingTweetsOnce() {
     if (!rows || rows.length === 0) return;
 
     for (const row of rows) {
+      const key = String(row.date_id);
+      if (tweetPostLocks.has(key)) continue;
+      tweetPostLocks.add(key);
       const imageUrl = (row.image_url ?? "").trim();
-      if (!imageUrl) continue;
-      const templateLabel = TEMPLATE_LABEL_BY_NUM[Number(row.template ?? 0)] ?? "Date";
-      const caption = `Another ${templateLabel} memory minted on Lemon. 🍋 #lemondating`;
       try {
+        const latest = await dbGetDate(String(row.date_id));
+        if (latest?.tweet_url) continue; // already posted by another path
+        if (!imageUrl) continue;
+        const templateLabel = TEMPLATE_LABEL_BY_NUM[Number(row.template ?? 0)] ?? "Date";
+        const caption = `Another ${templateLabel} memory minted on Lemon. 🍋 #lemondating`;
         const tweet = await postDateTweetFromImageUrl({ imageUrl, caption });
         await dbUpdateDate(String(row.date_id), { tweet_url: tweet.tweetUrl });
         console.log(`[tweet-retry] posted for date #${row.date_id}: ${tweet.tweetUrl}`);
@@ -1678,6 +1736,8 @@ async function retryMissingTweetsOnce() {
           break;
         }
         console.warn(`[tweet-retry] failed for date #${row.date_id}: ${msg}`);
+      } finally {
+        tweetPostLocks.delete(key);
       }
     }
   } catch (e) {
@@ -1901,4 +1961,12 @@ app.listen(PORT, () => {
   setInterval(runMatchingCycleGuarded, MATCH_INTERVAL_MS);
   setTimeout(retryMissingTweetsOnce, 20_000);
   setInterval(retryMissingTweetsOnce, 5 * 60 * 1000);
+  setTimeout(reconcileDatesFromChainOnce, 25_000);
+  setInterval(reconcileDatesFromChainOnce, 4 * 60 * 1000);
+  setInterval(() => {
+    const now = Date.now();
+    for (const [k, v] of mintChallenges.entries()) {
+      if (v.expiresAt < now) mintChallenges.delete(k);
+    }
+  }, 60_000);
 });

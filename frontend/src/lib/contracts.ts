@@ -51,6 +51,8 @@ export const lemonNFTAbi = parseAbi([
   "function getAgentTokens(address agent) view returns (uint256[])",
   "function getMemory(uint256 tokenId) view returns ((uint256 dateId, address agentA, address agentB, uint256 mintedAt))",
   "function totalMinted() view returns (uint256)",
+  "function mintFee() view returns (uint256)",
+  "function claimMemory(uint256 dateId) payable returns (uint256 tokenId)",
   "event DateMemoryMinted(uint256 indexed tokenId, uint256 indexed dateId, address agentA, address agentB, string tokenURI)",
 ]);
 

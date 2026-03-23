@@ -77,7 +77,11 @@ const dateAbi = parseAbi([
 
 const nftAbi = parseAbi([
   "function mintDateMemory(address agentA, address agentB, uint256 dateId, string metadataURI) returns (uint256 tokenId)",
+  "function approveMint(uint256 dateId, string metadataURI, address agentA, address agentB)",
+  "function mintFee() view returns (uint256)",
   "function totalMinted() view returns (uint256)",
+  "function ownerOf(uint256 tokenId) view returns (address)",
+  "event DateMemoryMinted(uint256 indexed tokenId, uint256 indexed dateId, address agentA, address agentB, string tokenURI)",
 ]);
 
 const agentAbi = parseAbi([
@@ -204,6 +208,41 @@ export async function completeDate(dateId: bigint, nftTokenId: bigint): Promise<
   await publicClient.waitForTransactionReceipt({ hash });
 }
 
+export async function readDateOnchain(dateId: bigint): Promise<{
+  id: bigint;
+  agentA: Address;
+  agentB: Address;
+  template: number;
+  status: number;
+  payerMode: number;
+  costUSD: bigint;
+  paymentToken: Address;
+  payerA: Address;
+  payerB: Address;
+  nftTokenId: bigint;
+  scheduledAt: bigint;
+  completedAt: bigint;
+}> {
+  const d = await dateContract().read.getDate([dateId]) as [
+    bigint, Address, Address, number, number, number, bigint, Address, Address, Address, bigint, bigint, bigint
+  ];
+  return {
+    id: d[0],
+    agentA: d[1],
+    agentB: d[2],
+    template: d[3],
+    status: d[4],
+    payerMode: d[5],
+    costUSD: d[6],
+    paymentToken: d[7],
+    payerA: d[8],
+    payerB: d[9],
+    nftTokenId: d[10],
+    scheduledAt: d[11],
+    completedAt: d[12],
+  };
+}
+
 export async function cancelDate(dateId: bigint): Promise<void> {
   const hash = await dateContract().write.cancelDate([dateId]);
   await publicClient.waitForTransactionReceipt({ hash });
@@ -243,6 +282,44 @@ export async function mintNFT(params: {
     throw new Error("[onchain] mintNFT: DateMemoryMinted event not found in transaction receipt");
   }
   return BigInt(mintedLog.topics[1]);
+}
+
+export async function ownerOfMemory(tokenId: bigint): Promise<Address> {
+  return await nftContract().read.ownerOf([tokenId]) as Address;
+}
+
+/// @notice Called by server after image is uploaded to IPFS — pre-approves the user mint.
+export async function approveMint(params: {
+  dateId: bigint;
+  metadataURI: string;
+  agentA: Address;
+  agentB: Address;
+}): Promise<void> {
+  const hash = await nftContract().write.approveMint([
+    params.dateId,
+    params.metadataURI,
+    params.agentA,
+    params.agentB,
+  ]);
+  await publicClient.waitForTransactionReceipt({ hash });
+}
+
+/// @notice Reads the DateMemoryMinted event from a user-submitted claimMemory tx.
+///         Returns the tokenId so the server can call completeDate.
+export async function getNftTokenIdFromTx(txHash: `0x${string}`): Promise<bigint> {
+  const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
+  const nftAddress = (process.env.LEMON_NFT_CONTRACT as string).toLowerCase();
+  const mintedLog = receipt.logs.find(
+    (l) => l.address.toLowerCase() === nftAddress && l.topics[1] !== undefined
+  );
+  if (!mintedLog || !mintedLog.topics[1]) {
+    throw new Error("[onchain] getNftTokenIdFromTx: DateMemoryMinted event not found");
+  }
+  return BigInt(mintedLog.topics[1]);
+}
+
+export async function getMintFee(): Promise<bigint> {
+  return await nftContract().read.mintFee() as bigint;
 }
 
 export async function resolveNextPayer(agentA: Address, agentB: Address): Promise<Address> {
@@ -694,14 +771,23 @@ export async function withdrawFromContract(
   recipient: Address,
   amount: bigint,
 ): Promise<string> {
+  return withdrawFromSpecificContract(process.env.LEMON_DATE_CONTRACT as Address, tokenAddress, recipient, amount);
+}
+
+export async function withdrawFromSpecificContract(
+  contractAddress: Address,
+  tokenAddress: Address,
+  recipient: Address,
+  amount: bigint,
+): Promise<string> {
   const hash = await walletClient.writeContract({
-    address: process.env.LEMON_DATE_CONTRACT as Address,
+    address: contractAddress,
     abi: dateAbi,
     functionName: "withdrawTokens",
     args: [tokenAddress, recipient, amount],
     chain,
   });
   await publicClient.waitForTransactionReceipt({ hash });
-  console.log(`[onchain] ✓ Withdrew ${amount} of ${tokenAddress} → ${recipient} (tx: ${hash})`);
+  console.log(`[onchain] ✓ Withdrew ${amount} of ${tokenAddress} from ${contractAddress} → ${recipient} (tx: ${hash})`);
   return hash;
 }

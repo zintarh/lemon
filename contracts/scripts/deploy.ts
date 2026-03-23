@@ -25,8 +25,10 @@ async function main() {
 
   // ─── 3. Deploy LemonNFT ───────────────────────────────────────────────────
   console.log("\n[3/3] Deploying LemonNFT...");
+  const treasury = deployer.address; // deployer is initial treasury — update via setTreasury() after deploy
+  const mintFee = ethers.parseEther("0.5"); // 0.5 CELO per mint — update via setMintFee() after deploy
   const LemonNFT = await ethers.getContractFactory("LemonNFT");
-  const lemonNFT = await LemonNFT.deploy(agentAddress); // pass LemonAgent so agents can mint autonomously
+  const lemonNFT = await LemonNFT.deploy(agentAddress, treasury, mintFee);
   await lemonNFT.waitForDeployment();
   const nftAddress = await lemonNFT.getAddress();
   console.log("  LemonNFT deployed to:", nftAddress);

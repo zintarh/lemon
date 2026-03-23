@@ -30,7 +30,8 @@ export async function syncAgentFromChain(wallet: Address): Promise<void> {
     agent_wallet: existing?.agent_wallet ?? "",
     agent_private_key: existing?.agent_private_key ?? "",
     registered_at: Number(profile.registeredAt),
-    active: profile.active,
+    active: true,       // registered = always active; in_pool controls matchability
+    in_pool: existing?.in_pool ?? true, // preserve pool opt-in; default true for new agents
     indexed_at: new Date().toISOString(),
   };
 

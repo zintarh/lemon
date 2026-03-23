@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { usePrivy } from "@privy-io/react-auth";
-import { useAccount, useReadContracts, useBalance } from "wagmi";
+import { useAccount, useReadContracts, useReadContract, useWriteContract, useWaitForTransactionReceipt, useBalance } from "wagmi";
 import { useRouter, useSearchParams } from "next/navigation";
 import { ConnectButton } from "@/components/ConnectButton";
 import { LemonPulseLoader } from "@/components/LemonPulseLoader";
@@ -11,8 +11,9 @@ import { useAgentDates, useDateRecord } from "@/hooks/useDates";
 import {
   DATE_TEMPLATE_LABELS,
   LEMON_DATE_ADDRESS,
+  LEMON_NFT_ADDRESS,
   lemonDateAbi,
-
+  lemonNFTAbi,
 } from "@/lib/contracts";
 import Link from "next/link";
 import { Badge } from "@/components/ui/badge";
@@ -62,6 +63,7 @@ type DateRecord = {
 type ServerDateMeta = {
   status?: number;
   nft_token_id?: string | null;
+  image_url?: string | null;
   tweet_url?: string | null;
   needs_user_mint?: boolean | null;
   failure_reason?: string | null;
@@ -277,23 +279,84 @@ function DateCard({
 
 function ActiveDatePanel({ dateId, myAddress }: { dateId: bigint; myAddress: Address }) {
   const { data: record } = useDateRecord(dateId) as { data: DateRecord | undefined };
-  const { remaining, progress } = useCountdown(record?.scheduledAt);
   const { data: myProfile } = useAgentProfile(myAddress);
-  const partnerAddr =
-    record
-      ? record.agentA.toLowerCase() === myAddress.toLowerCase()
-        ? record.agentB
-        : record.agentA
-      : undefined;
+  const partnerAddr = record
+    ? record.agentA.toLowerCase() === myAddress.toLowerCase() ? record.agentB : record.agentA
+    : undefined;
   const { data: partnerProfile } = useAgentProfile(partnerAddr);
   const SERVER_URL = process.env.NEXT_PUBLIC_SERVER_URL ?? "http://localhost:4000";
-  const [minting, setMinting] = useState(false);
-  const [mintResult, setMintResult] = useState<string | null>(null);
+  const [mintError, setMintError] = useState<string | null>(null);
+  const [mintDone, setMintDone] = useState(false);
   const [serverMeta, setServerMeta] = useState<ServerDateMeta | null>(null);
   const [poolChoice, setPoolChoice] = useState<"pending" | "yes" | "no">("pending");
   const [poolLoading, setPoolLoading] = useState(false);
 
-  async function setActiveStatus(active: boolean) {
+  // Read mint fee from contract
+  const { data: mintFeeData } = useReadContract({
+    address: LEMON_NFT_ADDRESS,
+    abi: lemonNFTAbi,
+    functionName: "mintFee",
+  });
+  const mintFee = (mintFeeData as bigint | undefined) ?? 0n;
+
+  // Write claimMemory on-chain
+  const { writeContractAsync } = useWriteContract();
+  const [mintTxHash, setMintTxHash] = useState<`0x${string}` | undefined>();
+  const { isLoading: isTxPending } = useWaitForTransactionReceipt({ hash: mintTxHash });
+
+  useEffect(() => {
+    let cancelled = false;
+    const load = () => fetch(`${SERVER_URL}/api/date/${dateId.toString()}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => { if (!cancelled) setServerMeta(d); })
+      .catch(() => {});
+    load();
+    const id = setInterval(load, 4000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [SERVER_URL, dateId]);
+
+  // When tx confirms, notify server to complete the date
+  useEffect(() => {
+    if (!mintTxHash || isTxPending) return;
+    (async () => {
+      try {
+        const r = await fetch(`${SERVER_URL}/api/date/${dateId.toString()}/confirm-mint`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ txHash: mintTxHash }),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error((d as { error?: string }).error ?? "Confirm failed");
+        setMintDone(true);
+        toast.success("Memory NFT minted!");
+      } catch (e) {
+        setMintError((e as Error).message);
+        toast.error("Confirm failed", { description: (e as Error).message });
+      }
+    })();
+  }, [mintTxHash, isTxPending, SERVER_URL, dateId]);
+
+  const minting = isTxPending || (!!mintTxHash && !mintDone && !mintError);
+
+  async function handleMint() {
+    setMintError(null);
+    try {
+      const hash = await writeContractAsync({
+        address: LEMON_NFT_ADDRESS,
+        abi: lemonNFTAbi,
+        functionName: "claimMemory",
+        args: [dateId],
+        value: mintFee,
+      });
+      setMintTxHash(hash);
+    } catch (e) {
+      const msg = (e as Error).message;
+      setMintError(msg);
+      toast.error("Mint failed", { description: msg });
+    }
+  }
+
+  async function handleReenter(active: boolean) {
     setPoolLoading(true);
     try {
       await fetch(`${SERVER_URL}/api/agents/${myAddress}/active`, {
@@ -301,49 +364,9 @@ function ActiveDatePanel({ dateId, myAddress }: { dateId: bigint; myAddress: Add
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ active }),
       });
-      setPoolChoice(active ? "yes" : "no");
-    } catch {
-      // no-op — UI still updates optimistically
-      setPoolChoice(active ? "yes" : "no");
-    } finally {
-      setPoolLoading(false);
-    }
-  }
-
-  useEffect(() => {
-    let cancelled = false;
-    fetch(`${SERVER_URL}/api/date/${dateId.toString()}`)
-      .then((r) => (r.ok ? r.json() : null))
-      .then((d) => {
-        if (!cancelled) setServerMeta(d);
-      })
-      .catch(() => {
-        if (!cancelled) setServerMeta(null);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [SERVER_URL, dateId, mintResult]);
-
-  async function handleMintMemory() {
-    setMinting(true);
-    try {
-      const r = await fetch(`${SERVER_URL}/api/date/${dateId.toString()}/mint-memory`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ wallet: myAddress }),
-      });
-      const d = await r.json().catch(() => ({}));
-      if (!r.ok) throw new Error((d as { error?: string }).error ?? "Failed to mint memory");
-      setMintResult("Memory minted! Finalized and moved to Date Attempts.");
-      toast.success("Memory minted");
-    } catch (e) {
-      const msg = (e as Error).message;
-      setMintResult(msg);
-      toast.error("Mint failed", { description: msg });
-    } finally {
-      setMinting(false);
-    }
+    } catch { /* optimistic */ }
+    setPoolChoice(active ? "yes" : "no");
+    setPoolLoading(false);
   }
 
   if (!record) {
@@ -354,239 +377,169 @@ function ActiveDatePanel({ dateId, myAddress }: { dateId: bigint; myAddress: Add
     );
   }
 
+  const partnerName = partnerProfile?.name ?? shortAddr(partnerAddr ?? "0x0000");
   const myAvatar = resolveAvatar(myProfile?.avatarURI);
   const partnerAvatar = resolveAvatar(partnerProfile?.avatarURI);
+  const templateEmoji = DATE_EMOJIS[record.template] ?? "🍋";
+  const templateLabel = DATE_TEMPLATE_LABELS[record.template] ?? "Date";
+  const dateImage = serverMeta?.image_url ?? null;
+  const tweetUrl = serverMeta?.tweet_url ?? null;
+  const isCompleted = record.status === 2 || mintDone;
+  const awaitingMint = !isCompleted && serverMeta?.needs_user_mint !== false;
 
-  const isDone = remaining === 0;
-
-  // Once the date is complete, replace the whole panel with a clean post-date screen
-  if (isDone && record.status === 2) {
-    const partnerName = partnerProfile?.name ?? shortAddr(partnerAddr ?? "0x0000");
-    const partnerAv = partnerAvatar;
+  // ── Completed: minted ──────────────────────────────────────────────────────
+  if (isCompleted) {
     return (
-      <div className="flex h-full flex-col items-center justify-center gap-6 px-6 text-center">
-        <div className="flex flex-col items-center gap-3">
-          <div className="flex items-center gap-[-8px]">
-            <div className="relative z-10 -mr-3">
-              {myAvatar ? (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img src={myAvatar} alt="" className="h-14 w-14 rounded-full border-2 border-white object-cover" />
-              ) : (
-                <div className="h-14 w-14 rounded-full border-2 border-white bg-amber-100 flex items-center justify-center text-[18px] font-bold text-amber-700">
-                  {myProfile?.name?.[0] ?? "?"}
-                </div>
-              )}
-            </div>
-            <div className="relative z-0">
-              {partnerAv ? (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img src={partnerAv} alt="" className="h-14 w-14 rounded-full border-2 border-white object-cover" />
-              ) : (
-                <div className="h-14 w-14 rounded-full border-2 border-white bg-indigo-100 flex items-center justify-center text-[18px] font-bold text-indigo-700">
-                  {partnerName[0]}
-                </div>
-              )}
-            </div>
+      <div className="flex h-full flex-col items-center justify-center gap-5 px-4 text-center overflow-y-auto py-6">
+        {/* Avatars */}
+        <div className="flex items-center">
+          <div className="relative z-10 -mr-3">
+            {myAvatar
+              ? <img src={myAvatar} alt="" className="h-14 w-14 rounded-full border-2 border-white object-cover" />
+              : <div className="h-14 w-14 rounded-full border-2 border-white bg-amber-100 flex items-center justify-center text-[18px] font-bold text-amber-700">{myProfile?.name?.[0] ?? "?"}</div>}
           </div>
-          <div>
-            <p className="text-[22px] font-black tracking-[-0.02em] text-[#1a1206]">Date complete! 🎉</p>
-            <p className="mt-1 text-[13px] text-[rgba(26,18,6,0.45)]">
-              Your date with {partnerName} has been sealed on-chain.
-            </p>
+          <div className="relative z-0">
+            {partnerAvatar
+              ? <img src={partnerAvatar} alt="" className="h-14 w-14 rounded-full border-2 border-white object-cover" />
+              : <div className="h-14 w-14 rounded-full border-2 border-white bg-indigo-100 flex items-center justify-center text-[18px] font-bold text-indigo-700">{partnerName[0]}</div>}
           </div>
         </div>
 
-        {poolChoice === "pending" ? (
-          <div className="w-full max-w-[320px] rounded-2xl border border-[rgba(0,0,0,0.07)] bg-[#FAFAF8] p-5">
-            <p className="mb-1 text-[14px] font-bold text-[#1a1206]">Re-enter the matching pool?</p>
-            <p className="mb-4 text-[12px] leading-relaxed text-[rgba(26,18,6,0.45)]">
-              Should your agent be available for new matches right away, or sit this one out?
-            </p>
-            <div className="flex gap-3">
-              <button
-                disabled={poolLoading}
-                onClick={() => setActiveStatus(false)}
-                className="flex-1 rounded-xl border border-[rgba(0,0,0,0.1)] bg-white py-2.5 text-[13px] font-semibold text-[rgba(26,18,6,0.6)] disabled:opacity-40 hover:bg-[rgba(0,0,0,0.03)] transition-colors cursor-pointer"
-              >
-                Not yet
-              </button>
-              <button
-                disabled={poolLoading}
-                onClick={() => setActiveStatus(true)}
-                className="flex-1 rounded-xl bg-[#D6820A] py-2.5 text-[13px] font-bold text-white disabled:opacity-40 hover:bg-[#b8690a] transition-colors cursor-pointer"
-              >
-                Yes, re-enter
-              </button>
-            </div>
-          </div>
-        ) : poolChoice === "yes" ? (
-          <div className="w-full max-w-[320px] rounded-2xl border border-emerald-200 bg-emerald-50 px-5 py-4 text-center">
-            <p className="text-[14px] font-bold text-emerald-800">Back in the pool!</p>
-            <p className="mt-1 text-[12px] text-emerald-600">Your agent is now available for new matches.</p>
-          </div>
-        ) : (
-          <div className="w-full max-w-[320px] rounded-2xl border border-[rgba(0,0,0,0.07)] bg-[#FAFAF8] px-5 py-4 text-center">
-            <p className="text-[14px] font-bold text-[#1a1206]">Taking a break</p>
-            <p className="mt-1 text-[12px] text-[rgba(26,18,6,0.45)]">Your agent won&apos;t be matched until you re-activate from settings.</p>
-          </div>
-        )}
-      </div>
-    );
-  }
-
-  // If timer is over but chain status is still ACTIVE, this attempt likely failed to
-  // finalize. Don't keep showing the "live date" interface forever.
-  if (isDone && record.status === 1) {
-    const awaitingMint = serverMeta?.needs_user_mint !== false;
-    return (
-      <div className="flex h-full flex-col items-center justify-center gap-4 px-6 text-center">
-        <span className="text-[32px]">{awaitingMint ? "🧠" : "⚠️"}</span>
-        <p className="text-[20px] font-black tracking-[-0.02em] text-[#1a1206]">
-          {awaitingMint ? "Date finished — mint memory to finalize" : "This date attempt is still marked active"}
-        </p>
-        <p className="max-w-[360px] text-[13px] leading-[1.6] text-[rgba(26,18,6,0.5)]">
-          {awaitingMint
-            ? "User-triggered flow: minting the memory completes the date, posts to X, and pauses the agents until re-entry."
-            : "The timer ended, but this attempt did not fully finalize yet. Check Date Attempts for failure/refund details."}
-        </p>
-        {awaitingMint && (
-          <button
-            onClick={handleMintMemory}
-            disabled={minting}
-            className="rounded-xl border-none bg-[#D6820A] px-4 py-2.5 text-[13px] font-bold text-white disabled:opacity-50 cursor-pointer hover:bg-[#b8690a] transition-colors"
-          >
-            {minting ? "Minting…" : "Mint memory NFT"}
-          </button>
-        )}
-        {mintResult && (
-          <p className="max-w-[360px] text-[12px] text-[rgba(26,18,6,0.55)]">{mintResult}</p>
-        )}
-      </div>
-    );
-  }
-
-  return (
-    <div className="flex h-full flex-col gap-4">
-      <div className="flex items-start justify-between">
         <div>
-          <p className="mb-[2px] text-[11px] font-bold uppercase tracking-[0.1em] text-[rgba(26,18,6,0.35)]">
-            Live Conversation
+          <p className="text-[22px] font-black tracking-[-0.02em] text-[#1a1206]">{templateEmoji} Date complete!</p>
+          <p className="mt-1 text-[13px] text-[rgba(26,18,6,0.45)]">
+            {myProfile?.name ?? "You"} &amp; {partnerName} — {templateLabel}
           </p>
-          <h2 className="text-[20px] font-bold tracking-[-0.02em] text-[#1a1206]">
-            {DATE_EMOJIS[record.template]} {DATE_TEMPLATE_LABELS[record.template] ?? "Date"}
-          </h2>
         </div>
-        {!isDone ? (
-          <div className="flex items-center gap-[6px] rounded-full border border-green-200 bg-green-50 px-3 py-[5px]">
-            <span className="h-[6px] w-[6px] animate-pulse rounded-full bg-green-500" />
-            <span className="text-[12px] font-semibold text-green-700">In Progress</span>
-          </div>
-        ) : (
-          <div className="flex items-center gap-[6px] rounded-full border border-emerald-200 bg-emerald-50 px-3 py-[5px]">
-            <span className="text-[12px] font-semibold text-emerald-700">✓ Complete</span>
+
+        {/* Date image */}
+        {dateImage && (
+          <div className="w-full max-w-[340px] rounded-2xl overflow-hidden border border-[rgba(0,0,0,0.07)]">
+            <img src={dateImage} alt="Date memory" className="w-full object-cover" />
+            {tweetUrl && (
+              <a href={tweetUrl} target="_blank" rel="noopener noreferrer"
+                className="flex items-center justify-center gap-1.5 py-2 bg-black text-white text-[12px] font-semibold hover:bg-[#111] transition-colors no-underline">
+                <svg className="w-3.5 h-3.5 fill-white" viewBox="0 0 24 24"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-4.714-6.231-5.401 6.231H2.744l7.737-8.858L1.254 2.25H8.08l4.259 5.63 5.905-5.63zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg>
+                View on X
+              </a>
+            )}
           </div>
         )}
-      </div>
 
-      <div className="flex items-center justify-center gap-6 rounded-2xl border border-[rgba(0,0,0,0.06)] bg-white py-6">
-        <div className="flex flex-col items-center gap-2">
-          <Avatar className="h-14 w-14 border-2 border-[rgba(200,146,10,0.3)] bg-[rgba(248,230,130,0.4)]">
-            {myAvatar ? <AvatarImage src={myAvatar} alt="" className="object-cover" /> : null}
-            <AvatarFallback className="bg-transparent text-[20px] font-black text-[#92400e]">
-              {myProfile?.name?.[0]?.toUpperCase() ?? "?"}
-            </AvatarFallback>
-          </Avatar>
-          <span className="max-w-[90px] truncate text-[12px] font-semibold text-[#3d1f08]">
-            {myProfile?.name ?? shortAddr(myAddress)}
-          </span>
-          <span className="text-[10px] text-[rgba(26,18,6,0.35)]">You</span>
-        </div>
-
-        <div className="flex flex-col items-center gap-1">
-          <div className="rounded-full bg-[rgba(214,130,10,0.1)] px-3 py-1 text-[13px] font-black text-[#D6820A]">
-            vs
-          </div>
-        </div>
-
-        <div className="flex flex-col items-center gap-2">
-          <Avatar className="h-14 w-14 border-2 border-[rgba(99,102,241,0.3)] bg-[rgba(99,102,241,0.08)]">
-            {partnerAvatar ? <AvatarImage src={partnerAvatar} alt="" className="object-cover" /> : null}
-            <AvatarFallback className="bg-transparent text-[20px] font-black text-indigo-600">
-              {partnerProfile?.name?.[0]?.toUpperCase() ?? "?"}
-            </AvatarFallback>
-          </Avatar>
-          <span className="max-w-[90px] truncate text-[12px] font-semibold text-[#3d1f08]">
-            {partnerProfile?.name ?? (partnerAddr ? shortAddr(partnerAddr) : "…")}
-          </span>
-          <span className="text-[10px] text-[rgba(26,18,6,0.35)]">Partner</span>
-        </div>
-      </div>
-
-      <div className="rounded-2xl border border-[rgba(0,0,0,0.06)] bg-white p-4">
-        <div className="mb-3 flex items-center justify-between">
-          <span className="text-[13px] font-semibold text-[rgba(26,18,6,0.45)]">
-            {isDone ? "Conversation complete" : "Time remaining"}
-          </span>
-          <span
-            className={`text-[22px] font-black tracking-[-0.03em] ${
-              isDone ? "text-emerald-600" : "text-[#D6820A]"
-            }`}
-          >
-            {isDone ? "00:00" : formatTime(remaining)}
-          </span>
-        </div>
-        <Progress value={progress} className="h-[6px]" />
-        <p className="mt-2 text-[11px] text-[rgba(26,18,6,0.28)]">
-          2-minute conversation · Date #{dateId.toString()}
-        </p>
-      </div>
-
-      <div className="flex flex-1 flex-col overflow-hidden rounded-2xl border border-[rgba(0,0,0,0.06)] bg-white">
-        <div className="flex items-center justify-between border-b border-[rgba(0,0,0,0.06)] px-4 py-3">
-          <p className="text-[12px] font-bold uppercase tracking-[0.08em] text-[rgba(26,18,6,0.35)]">
-            Conversation Log
-          </p>
-          <span className="text-[11px] text-[rgba(26,18,6,0.3)]">Powered by Claude</span>
-        </div>
-
-        <div className="flex flex-1 flex-col items-center justify-center gap-3 p-8 text-center">
-          {!isDone ? (
-            <>
-              <div className="flex gap-[6px]">
-                {[0, 1, 2].map((i) => (
-                  <motion.div
-                    key={i}
-                    className="h-2 w-2 rounded-full bg-[#D6820A]"
-                    animate={{ y: [0, -6, 0] }}
-                    transition={{ repeat: Infinity, duration: 0.9, delay: i * 0.15 }}
-                  />
-                ))}
+        {/* Re-enter pool */}
+        <div className="w-full max-w-[340px]">
+          {poolChoice === "pending" ? (
+            <div className="rounded-2xl border border-[rgba(0,0,0,0.07)] bg-[#FAFAF8] p-4">
+              <p className="text-[14px] font-bold text-[#1a1206] mb-1">Re-enter the dating pool?</p>
+              <p className="text-[12px] text-[rgba(26,18,6,0.45)] mb-4 leading-relaxed">
+                Your agent is paused after this date. Enter the pool to be matched again.
+              </p>
+              <div className="flex gap-3">
+                <button onClick={() => handleReenter(false)} disabled={poolLoading}
+                  className="flex-1 rounded-xl border border-[rgba(0,0,0,0.1)] bg-white py-2.5 text-[13px] font-semibold text-[rgba(26,18,6,0.6)] disabled:opacity-40 cursor-pointer hover:bg-[rgba(0,0,0,0.03)] transition-colors">
+                  Not yet
+                </button>
+                <button onClick={() => handleReenter(true)} disabled={poolLoading}
+                  className="flex-1 rounded-xl bg-[#D6820A] py-2.5 text-[13px] font-bold text-white disabled:opacity-40 cursor-pointer hover:bg-[#b8690a] transition-colors">
+                  {poolLoading ? "…" : "Re-enter pool"}
+                </button>
               </div>
-              <p className="text-[14px] font-medium text-[rgba(26,18,6,0.5)]">
-                Agents are conversing…
-              </p>
-              <p className="max-w-[220px] text-[12px] leading-[1.6] text-[rgba(26,18,6,0.28)]">
-                The full conversation transcript will be available once the date completes.
-              </p>
-            </>
+            </div>
+          ) : poolChoice === "yes" ? (
+            <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-5 py-4 text-center">
+              <p className="text-[14px] font-bold text-emerald-800">Back in the pool!</p>
+              <p className="mt-1 text-[12px] text-emerald-600">Matching will run automatically. Check back soon.</p>
+            </div>
           ) : (
-            <>
-              <span className="text-[32px]">🎉</span>
-              <p className="text-[15px] font-semibold text-[#1a1206]">Date completed!</p>
-              <p className="max-w-[220px] text-[12px] leading-[1.6] text-[rgba(26,18,6,0.35)]">
-                A memory NFT has been minted and the match has been sealed on-chain.
-              </p>
-            </>
+            <div className="rounded-2xl border border-[rgba(0,0,0,0.07)] bg-[#FAFAF8] px-5 py-4 flex items-center justify-between gap-3">
+              <p className="text-[13px] text-[rgba(26,18,6,0.5)]">Agent paused</p>
+              <button onClick={() => handleReenter(true)} disabled={poolLoading}
+                className="rounded-xl bg-[#D6820A] px-4 py-2 text-[12px] font-bold text-white disabled:opacity-40 cursor-pointer hover:bg-[#b8690a] transition-colors">
+                Re-enter pool
+              </button>
+            </div>
           )}
         </div>
       </div>
+    );
+  }
 
-      <div className="flex items-center justify-between rounded-2xl border border-[rgba(0,0,0,0.06)] bg-[#FAFAF8] px-4 py-3">
-        <span className="text-[13px] text-[rgba(26,18,6,0.45)]">Date cost</span>
-        <span className="text-[15px] font-bold text-[#1a1206]">
-          ${(Number(record.costUSD) / 100).toFixed(2)}
-        </span>
+  // ── Awaiting mint ──────────────────────────────────────────────────────────
+  if (awaitingMint) {
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-5 px-4 text-center overflow-y-auto py-6">
+        {/* Avatars */}
+        <div className="flex items-center">
+          <div className="relative z-10 -mr-3">
+            {myAvatar
+              ? <img src={myAvatar} alt="" className="h-14 w-14 rounded-full border-2 border-white object-cover" />
+              : <div className="h-14 w-14 rounded-full border-2 border-white bg-amber-100 flex items-center justify-center text-[18px] font-bold text-amber-700">{myProfile?.name?.[0] ?? "?"}</div>}
+          </div>
+          <div className="relative z-0">
+            {partnerAvatar
+              ? <img src={partnerAvatar} alt="" className="h-14 w-14 rounded-full border-2 border-white object-cover" />
+              : <div className="h-14 w-14 rounded-full border-2 border-white bg-indigo-100 flex items-center justify-center text-[18px] font-bold text-indigo-700">{partnerName[0]}</div>}
+          </div>
+        </div>
+
+        <div>
+          <p className="text-[22px] font-black tracking-[-0.02em] text-[#1a1206]">
+            {templateEmoji} Your agents hit it off!
+          </p>
+          <p className="mt-1 text-[13px] text-[rgba(26,18,6,0.45)]">
+            {myProfile?.name ?? "You"} &amp; {partnerName} — {templateLabel}
+          </p>
+        </div>
+
+        {/* Date image */}
+        {dateImage ? (
+          <div className="w-full max-w-[340px] rounded-2xl overflow-hidden border border-amber-200 shadow-[0_2px_12px_rgba(214,130,10,0.12)]">
+            <img src={dateImage} alt="Date memory" className="w-full object-cover" />
+          </div>
+        ) : (
+          <div className="w-full max-w-[340px] aspect-[4/3] rounded-2xl bg-[linear-gradient(135deg,#fef9ee,#fde68a)] flex items-center justify-center border border-amber-200">
+            <div className="flex flex-col items-center gap-2">
+              <LemonPulseLoader className="h-8 w-8" />
+              <p className="text-[12px] text-amber-700 font-medium">Generating date memory…</p>
+            </div>
+          </div>
+        )}
+
+        {/* Mint CTA */}
+        <div className="w-full max-w-[340px] flex flex-col gap-3">
+          <button
+            onClick={handleMint}
+            disabled={minting || !dateImage}
+            className="w-full rounded-2xl bg-[#D6820A] py-3.5 text-[15px] font-bold text-white disabled:opacity-50 cursor-pointer hover:bg-[#b8690a] transition-colors shadow-[0_2px_8px_rgba(214,130,10,0.25)]"
+          >
+            {minting
+              ? "Minting…"
+              : mintFee > 0n
+              ? `Mint Memory NFT · ${(Number(mintFee) / 1e18).toFixed(2)} CELO`
+              : "Mint your Memory NFT"}
+          </button>
+          {mintError && (
+            <p className="text-[12px] text-red-500 text-center">{mintError}</p>
+          )}
+          <p className="text-[11px] text-[rgba(26,18,6,0.35)] text-center">
+            {mintFee > 0n
+              ? `${(Number(mintFee) / 1e18).toFixed(2)} CELO mint fee goes to the platform treasury. Seals your date on-chain forever.`
+              : "Minting seals the date on-chain. After minting you can re-enter the pool."}
+          </p>
+        </div>
       </div>
+    );
+  }
+
+  // ── Booking in progress (date booked but no image yet) ─────────────────────
+  return (
+    <div className="flex h-full flex-col items-center justify-center gap-4 text-center px-6">
+      <LemonPulseLoader className="h-10 w-10" />
+      <p className="text-[16px] font-bold text-[#1a1206]">Booking your date…</p>
+      <p className="text-[13px] text-[rgba(26,18,6,0.45)] max-w-[260px] leading-relaxed">
+        Generating your date memory image and booking on-chain. This takes about 30 seconds.
+      </p>
+      <p className="text-[11px] text-[rgba(26,18,6,0.3)]">Date #{dateId.toString()}</p>
     </div>
   );
 }
@@ -601,19 +554,6 @@ type LiveMessage = {
   phase?: "chat" | "proposal" | "accepted";
 };
 
-type PaymentApproval = {
-  fundedWallet: string;
-  fundedAgentName: string;
-  shortWallet: string;
-  shortAgentName: string;
-  shortAgentWalletAddress: string;
-  shortHas: string;
-  shortNeeds: string;
-  fullAmountUSD: string;
-  status: "pending" | "approved" | "declined" | "expired";
-  expiresAt: number;
-};
-
 type LiveConvoData = {
   wallet_a: string;
   wallet_b: string;
@@ -624,7 +564,6 @@ type LiveConvoData = {
   bookingError?: string | null;
   bookingPending?: boolean;
   bookingComplete?: boolean;
-  paymentApproval?: PaymentApproval | null;
   dateImageUrl?: string | null;
   dateTweetUrl?: string | null;
   isStale?: boolean;
@@ -739,44 +678,13 @@ function LiveConversationPanel({
   const bookingPending = convo.bookingPending ?? false;
   const bookingComplete = convo.bookingComplete ?? false;
   const bookingError = convo.bookingError ?? null;
-  const paymentApproval = convo.paymentApproval ?? null;
   const dateImageUrl = convo.dateImageUrl ?? null;
   const dateTweetUrl = convo.dateTweetUrl ?? null;
 
   const [retrying, setRetrying] = useState(false);
-  const [dismissed, setDismissed] = useState(false);
-  const [approvalLoading, setApprovalLoading] = useState(false);
   const [poolChoice, setPoolChoice] = useState<"loading" | "pending" | "yes" | "no">("loading");
   const [poolLoading, setPoolLoading] = useState(false);
 
-  const amIwallet_a = myAddress?.toLowerCase() === convo.wallet_a.toLowerCase();
-  const partnerName = amIwallet_a ? nameB : nameA;
-
-  const iAmFundedParty = paymentApproval?.status === "pending" &&
-    myAddress?.toLowerCase() === paymentApproval.fundedWallet.toLowerCase();
-  const iAmShortParty = paymentApproval?.status === "pending" &&
-    myAddress?.toLowerCase() === paymentApproval.shortWallet.toLowerCase();
-
-  async function handleApprovalResponse(approve: boolean) {
-    if (!myAddress) return;
-    setApprovalLoading(true);
-    try {
-      const r = await fetch(`${SERVER_URL}/api/payment-approval/respond`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ wallet: myAddress, approve }),
-      });
-      if (!r.ok) {
-        const err = await r.json().catch(() => ({}));
-        toast.error("Failed", { description: (err as { error?: string }).error ?? r.statusText });
-      } else {
-        toast.success(approve ? "Covering the date — booking in progress!" : "Date cancelled");
-      }
-    } catch {
-      toast.error("Could not reach server");
-    }
-    setApprovalLoading(false);
-  }
 
   async function handleRetry() {
     setRetrying(true);
@@ -796,39 +704,6 @@ function LiveConversationPanel({
     setRetrying(false);
   }
 
-  async function handleRematch() {
-    try {
-      await fetch(`${SERVER_URL}/api/date/rematch`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ walletA: convo.wallet_a, walletB: convo.wallet_b }),
-      });
-      toast.success(`Starting new conversation with ${partnerName}…`);
-      setDismissed(true);
-    } catch {
-      toast.error("Could not reach server");
-    }
-  }
-
-  async function setActiveStatus(active: boolean) {
-    if (!myAddress) return;
-    setPoolLoading(true);
-    try {
-      const r = await fetch(`${SERVER_URL}/api/agents/${myAddress}/active`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ active }),
-      });
-      if (!r.ok) throw new Error("Failed");
-      setPoolChoice(active ? "yes" : "no");
-      toast.success(active ? "Back in the pool" : "Agent paused");
-    } catch {
-      // optimistic fallback
-      setPoolChoice(active ? "yes" : "no");
-    } finally {
-      setPoolLoading(false);
-    }
-  }
 
   useEffect(() => {
     if (!bookingComplete || !myAddress) return;
@@ -871,10 +746,6 @@ function LiveConversationPanel({
 
   const phaseLabel = isStale
     ? "⚠️ Conversation stalled"
-    : paymentApproval?.status === "pending" && iAmFundedParty
-    ? "💳 Your match needs help paying"
-    : paymentApproval?.status === "pending" && iAmShortParty
-    ? "⏳ Waiting for your match to respond"
     : convo.passed && bookingError
     ? "⚠️ Booking failed"
     : convo.passed && bookingPending
@@ -971,202 +842,54 @@ function LiveConversationPanel({
         })}
       </div>
 
-      {/* ── Booking status card ── */}
-      {convo.passed && templateDetail && !dismissed && (
+      {/* ── Booking status card (shown after conversation passes) ── */}
+      {convo.passed && templateDetail && (
         <div className={`shrink-0 rounded-2xl border p-4 flex flex-col gap-3 ${
-          paymentApproval?.status === "pending" && iAmFundedParty ? "border-amber-300 bg-amber-50"
-          : paymentApproval?.status === "pending" && iAmShortParty ? "border-blue-200 bg-blue-50"
-          : bookingError ? "border-red-200 bg-red-50"
+          bookingError ? "border-red-200 bg-red-50"
           : bookingComplete ? "border-emerald-200 bg-emerald-50"
           : "border-amber-200 bg-amber-50"
         }`}>
-          {/* Template + cost */}
           <div className="flex items-center gap-3">
             <span className="text-2xl">{templateDetail.emoji}</span>
             <div className="flex-1 min-w-0">
               <p className="text-[14px] font-bold text-[#1a1206]">{templateDetail.label}</p>
-              {paymentApproval?.status === "pending" && iAmFundedParty ? (
-                <p className="text-[11px] text-amber-700 leading-snug">Your match&apos;s agent needs help — see below</p>
-              ) : paymentApproval?.status === "pending" && iAmShortParty ? (
-                <p className="text-[11px] text-blue-600 leading-snug">Waiting for {paymentApproval.fundedAgentName}&apos;s owner to respond…</p>
-              ) : bookingError ? (
+              {bookingError ? (
                 <p className="text-[11px] text-red-500 leading-snug">{bookingError}</p>
               ) : bookingPending ? (
-                <p className="text-[11px] text-amber-700 leading-snug">Agent is booking the date…</p>
+                <p className="text-[11px] text-amber-700 leading-snug">Booking on-chain… ~30s</p>
               ) : bookingComplete ? (
-                <p className="text-[11px] text-emerald-600 leading-snug">Date booked! Memory NFT minted. 🎉</p>
+                <p className="text-[11px] text-emerald-600 leading-snug">Date booked! Head to your dashboard to mint.</p>
               ) : (
                 <p className="text-[11px] text-amber-700 leading-snug">Agents agreed — booking in progress…</p>
               )}
             </div>
-            <div className="text-right shrink-0">
-              <p className="text-[15px] font-black text-[#D6820A]">{templateDetail.cost}</p>
-              <p className="text-[9px] text-[rgba(26,18,6,0.4)]">cUSD</p>
-            </div>
           </div>
 
-          {/* Payment approval — funded party sees approve/decline */}
-          {paymentApproval?.status === "pending" && iAmFundedParty && (
-            <div className="flex flex-col gap-2.5 rounded-xl border border-amber-200 bg-white p-3">
-              <p className="text-[13px] font-semibold text-[#1a1206]">
-                {paymentApproval.shortAgentName}&apos;s wallet is short
-              </p>
-              <p className="text-[12px] text-[rgba(26,18,6,0.6)] leading-snug">
-                {paymentApproval.shortAgentName} only has <span className="font-semibold text-red-500">{paymentApproval.shortHas} cUSD</span> but needs <span className="font-semibold">{paymentApproval.shortNeeds} cUSD</span> for their share.
-                Would you like to cover the full <span className="font-semibold text-[#D6820A]">${paymentApproval.fullAmountUSD}</span> for this date?
-                You normally split the cost, but your match hasn&apos;t funded their agent yet.
-              </p>
-              <div className="flex gap-2">
-                <button
-                  onClick={() => handleApprovalResponse(true)}
-                  disabled={approvalLoading}
-                  className="flex-1 rounded-xl bg-[#D6820A] py-2 text-[13px] font-bold text-white disabled:opacity-50 cursor-pointer hover:bg-[#b8700a] transition-colors"
-                >
-                  {approvalLoading ? "Processing…" : `Yes, I'll cover it ($${paymentApproval.fullAmountUSD})`}
-                </button>
-                <button
-                  onClick={() => handleApprovalResponse(false)}
-                  disabled={approvalLoading}
-                  className="flex-1 rounded-xl border border-red-200 bg-white py-2 text-[13px] font-semibold text-red-500 disabled:opacity-50 cursor-pointer hover:bg-red-50 transition-colors"
-                >
-                  No, cancel
-                </button>
-              </div>
-            </div>
-          )}
-
-          {/* Payment approval — short party sees funding instructions */}
-          {paymentApproval?.status === "pending" && iAmShortParty && (
-            <div className="flex flex-col gap-2 rounded-xl border border-blue-200 bg-white p-3">
-              <p className="text-[13px] font-semibold text-[#1a1206]">Your agent wallet needs cUSD</p>
-              <p className="text-[12px] text-[rgba(26,18,6,0.6)] leading-snug">
-                Your agent only has <span className="font-semibold text-red-500">{paymentApproval.shortHas} cUSD</span> but needs <span className="font-semibold">{paymentApproval.shortNeeds} cUSD</span>.
-                Send cUSD on Celo to your agent wallet below to fund future dates. Your match {paymentApproval.fundedAgentName} has been asked if they&apos;ll cover this one.
-              </p>
-              <div className="flex items-center gap-2 rounded-lg bg-[#f5f0e8] px-3 py-2">
-                <span className="text-[11px] font-mono text-[rgba(26,18,6,0.6)] break-all flex-1">{paymentApproval.shortAgentWalletAddress}</span>
-                <button
-                  onClick={() => { navigator.clipboard.writeText(paymentApproval.shortAgentWalletAddress); toast.success("Address copied"); }}
-                  className="shrink-0 text-[11px] font-semibold text-[#D6820A] cursor-pointer hover:underline"
-                >
-                  Copy
-                </button>
-              </div>
-            </div>
-          )}
-
-          {/* Spinner while booking */}
           {bookingPending && !bookingError && (
             <div className="flex items-center gap-2">
               <LemonPulseLoader className="h-4 w-4 shrink-0" />
-              <p className="text-[11px] text-[rgba(26,18,6,0.45)]">Booking on-chain + minting NFT… ~30s</p>
+              <p className="text-[11px] text-[rgba(26,18,6,0.45)]">Generating date image + booking on-chain…</p>
             </div>
           )}
 
-          {/* Retry on error */}
-          {bookingError && !paymentApproval && (
-            <button
-              onClick={handleRetry}
-              disabled={retrying}
-              className="w-full rounded-xl bg-red-500 py-2 text-[13px] font-bold text-white disabled:opacity-50 cursor-pointer hover:bg-red-600 transition-colors"
-            >
+          {bookingError && (
+            <button onClick={handleRetry} disabled={retrying}
+              className="w-full rounded-xl bg-red-500 py-2 text-[13px] font-bold text-white disabled:opacity-50 cursor-pointer hover:bg-red-600 transition-colors">
               {retrying ? "Retrying…" : "Retry booking"}
             </button>
           )}
 
-          {/* Date memory image + tweet link after success */}
           {bookingComplete && dateImageUrl && (
             <div className="rounded-xl overflow-hidden border border-amber-200">
               {/* eslint-disable-next-line @next/next/no-img-element */}
               <img src={dateImageUrl} alt="Date memory" className="w-full object-cover max-h-48" />
               {dateTweetUrl && (
-                <a
-                  href={dateTweetUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="flex items-center justify-center gap-1.5 py-2 bg-black text-white text-[12px] font-semibold hover:bg-[#111] transition-colors"
-                >
+                <a href={dateTweetUrl} target="_blank" rel="noopener noreferrer"
+                  className="flex items-center justify-center gap-1.5 py-2 bg-black text-white text-[12px] font-semibold hover:bg-[#111] transition-colors no-underline">
                   <svg className="w-3.5 h-3.5 fill-white" viewBox="0 0 24 24"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-4.714-6.231-5.401 6.231H2.744l7.737-8.858L1.254 2.25H8.08l4.259 5.63 5.905-5.63zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg>
                   View on X
                 </a>
               )}
-            </div>
-          )}
-
-          {/* After completion: explicit pool re-entry */}
-          {bookingComplete && (
-            <div className="rounded-xl border border-[rgba(0,0,0,0.08)] bg-[#FAFAF8] p-3 flex flex-col gap-3">
-              <div>
-                <p className="text-[13px] font-bold text-[#1a1206]">Re-enter matching pool?</p>
-                <p className="text-[11px] text-[rgba(26,18,6,0.45)] leading-snug">
-                  Your agent is paused after this completed date. Choose when to match again.
-                </p>
-              </div>
-              {poolChoice === "loading" ? (
-                <div className="flex items-center gap-2 text-[11px] text-[rgba(26,18,6,0.45)]">
-                  <LemonPulseLoader className="h-3.5 w-3.5" />
-                  Checking pool status…
-                </div>
-              ) : poolChoice === "pending" ? (
-                <div className="flex gap-2">
-                  <button
-                    onClick={() => setActiveStatus(false)}
-                    disabled={poolLoading}
-                    className="flex-1 rounded-xl border border-[rgba(0,0,0,0.1)] bg-white py-2 text-[12px] font-semibold text-[rgba(26,18,6,0.6)] disabled:opacity-50 cursor-pointer hover:bg-[rgba(0,0,0,0.03)] transition-colors"
-                  >
-                    Not now
-                  </button>
-                  <button
-                    onClick={() => setActiveStatus(true)}
-                    disabled={poolLoading}
-                    className="flex-1 rounded-xl border-none bg-[#D6820A] py-2 text-[12px] font-bold text-white disabled:opacity-50 cursor-pointer hover:bg-[#b8690a] transition-colors"
-                  >
-                    Yes, re-enter
-                  </button>
-                </div>
-              ) : poolChoice === "yes" ? (
-                <div className="flex gap-2">
-                  <div className="flex-1 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-[11px] text-emerald-700">
-                    Back in the pool. Matching can run again.
-                  </div>
-                  <button
-                    onClick={() => setActiveStatus(false)}
-                    disabled={poolLoading}
-                    className="rounded-xl border border-[rgba(0,0,0,0.1)] bg-white px-3 py-2 text-[11px] font-semibold text-[rgba(26,18,6,0.6)] disabled:opacity-50 cursor-pointer hover:bg-[rgba(0,0,0,0.03)] transition-colors"
-                  >
-                    Pause
-                  </button>
-                </div>
-              ) : (
-                <div className="flex gap-2">
-                  <div className="flex-1 rounded-xl border border-[rgba(0,0,0,0.08)] bg-white px-3 py-2 text-[11px] text-[rgba(26,18,6,0.55)]">
-                    Agent paused. No new automatic matches.
-                  </div>
-                  <button
-                    onClick={() => setActiveStatus(true)}
-                    disabled={poolLoading}
-                    className="rounded-xl border-none bg-[#D6820A] px-3 py-2 text-[11px] font-bold text-white disabled:opacity-50 cursor-pointer hover:bg-[#b8690a] transition-colors"
-                  >
-                    Re-enter
-                  </button>
-                </div>
-              )}
-              <div className="flex gap-2">
-                {partnerName && (
-                  <button
-                    onClick={handleRematch}
-                    className="flex-1 rounded-xl border border-amber-300 bg-amber-100 py-2 text-[12px] font-bold text-amber-800 cursor-pointer hover:bg-amber-200 transition-colors"
-                  >
-                    💛 Date {partnerName} again
-                  </button>
-                )}
-                <button
-                  onClick={() => setDismissed(true)}
-                  className="flex-1 rounded-xl border border-[rgba(0,0,0,0.1)] bg-white py-2 text-[12px] font-semibold text-[rgba(26,18,6,0.55)] cursor-pointer hover:bg-[rgba(0,0,0,0.03)] transition-colors"
-                >
-                  Close
-                </button>
-              </div>
             </div>
           )}
         </div>

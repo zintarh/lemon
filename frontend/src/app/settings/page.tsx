@@ -320,6 +320,7 @@ export default function SettingsPage() {
     }
   }
 
+
   async function handleAvatarChange(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -810,6 +811,7 @@ export default function SettingsPage() {
                     </div>
                   </div>
                 </div>
+
               </section>
             </main>
           </div>
