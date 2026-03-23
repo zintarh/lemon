@@ -47,6 +47,7 @@ import {
   dbGetAllActiveAgents,
   dbGetAgent,
   dbGetDate,
+  dbGetAgentDates,
   dbUpsertDate,
   dbGetLeaderboard,
   dbSaveConversation,
@@ -997,6 +998,24 @@ app.get("/api/agents/:wallet", async (req: Request, res: Response) => {
       return;
     }
     res.json(agent);
+  } catch (err) {
+    res.status(500).json({ error: (err as Error).message });
+  }
+});
+
+// ─── GET /api/agents/:wallet/dates ────────────────────────────────────────────
+// Returns all date records for a wallet from Supabase (reliable fallback when
+// the on-chain getAgentDates cache is stale or the push hasn't indexed yet).
+
+app.get("/api/agents/:wallet/dates", async (req: Request, res: Response) => {
+  try {
+    const wallet = req.params.wallet;
+    if (!wallet || !isAddress(wallet)) {
+      res.status(400).json({ error: "Invalid wallet address" });
+      return;
+    }
+    const dates = await dbGetAgentDates(wallet);
+    res.json(dates);
   } catch (err) {
     res.status(500).json({ error: (err as Error).message });
   }

@@ -1543,28 +1543,16 @@ function HistoryPanel({
   dateIds,
   myAddress,
   stats,
-  partnerAddresses,
 }: {
   dateIds: bigint[];
   myAddress: Address;
   stats: AgentStats | null;
-  partnerAddresses: Address[];
 }) {
-  const hasCompletedDate = (stats?.datesCompleted ?? 0) > 0;
-  const [hasRevealInfo, setHasRevealInfo] = useState<boolean | null>(null);
   const [isVerified, setIsVerified] = useState<boolean | null>(null);
   const [hasIdentity, setHasIdentity] = useState<boolean | null>(null);
   const [identityId, setIdentityId] = useState<string | null>(null);
   const [agentWallet, setAgentWallet] = useState<string | null>(null);
   const SERVER_URL = process.env.NEXT_PUBLIC_SERVER_URL ?? "http://localhost:4000";
-
-  useEffect(() => {
-    if (!myAddress) return;
-    fetch(`${SERVER_URL}/api/contact/${myAddress}`)
-      .then(r => r.json())
-      .then(d => setHasRevealInfo(!!(d.telegram_handle || d.email || d.phone)))
-      .catch(() => setHasRevealInfo(false));
-  }, [myAddress, SERVER_URL]);
 
   useEffect(() => {
     if (!myAddress) return;
@@ -1639,14 +1627,6 @@ function HistoryPanel({
         </>
       )}
 
-      {/* Reveal setup prompt — show after first date if not yet set */}
-      {hasCompletedDate && hasRevealInfo === false && (
-        <>
-          <SetupRevealCard myAddress={myAddress} />
-          <Separator className="bg-[rgba(0,0,0,0.06)]" />
-        </>
-      )}
-
       <div className="flex items-center justify-between shrink-0">
         <div>
           <p className="mb-[2px] text-[11px] font-bold uppercase tracking-[0.1em] text-[rgba(26,18,6,0.35)]">
@@ -1677,7 +1657,6 @@ function HistoryPanel({
         </div>
       )}
 
-      <RevealSection myAddress={myAddress} partnerAddresses={partnerAddresses} />
     </div>
   );
 }
@@ -1733,8 +1712,31 @@ export default function DashboardPage() {
     }
   }, [searchParams, router]);
   const { data: profile } = useAgentProfile(address);
-  const { data: dateIds } = useAgentDates(address);
-  const allDateIds = (dateIds as bigint[] | undefined) ?? [];
+  const { data: onChainDateIds } = useAgentDates(address);
+
+  // Fetch dates from server DB as the reliable source — on-chain cache can be stale
+  const [serverDateIds, setServerDateIds] = useState<bigint[]>([]);
+  useEffect(() => {
+    if (!address) return;
+    fetch(`${SERVER}/api/agents/${address}/dates`)
+      .then(r => r.ok ? r.json() : [])
+      .then((dates: { date_id: string }[]) => {
+        setServerDateIds(dates.map(d => BigInt(d.date_id)));
+      })
+      .catch(() => {});
+  }, [address]);
+
+  // Merge on-chain + server IDs (union, preserving order, server takes priority)
+  const allDateIds = (() => {
+    const onChain = (onChainDateIds as bigint[] | undefined) ?? [];
+    const seen = new Set<string>();
+    const merged: bigint[] = [];
+    for (const id of [...serverDateIds, ...onChain]) {
+      const key = id.toString();
+      if (!seen.has(key)) { seen.add(key); merged.push(id); }
+    }
+    return merged.sort((a, b) => Number(a - b));
+  })();
 
   // Check if onboarding is complete (agent_wallet set on server)
   // Registered on-chain but missing agent_wallet = they refreshed during onboarding → send back
@@ -1812,22 +1814,29 @@ export default function DashboardPage() {
     return () => clearInterval(id);
   }, [address, activeDateId]);
 
-  // Unique partners from recent completed dates (for reveal eligibility checks)
-  const partnerAddresses: Address[] = (() => {
-    if (!recentRecords || !address) return [];
-    const seen = new Set<string>();
-    const partners: Address[] = [];
+  // Show a toast when user reaches 3 completed dates with a partner (reveal eligibility)
+  useEffect(() => {
+    if (!recentRecords || !address) return;
+    const countPerPartner = new Map<string, number>();
     for (const r of recentRecords) {
       const rec = r.result as DateRecord | undefined;
-      if (!rec || rec.status !== 2) continue; // only completed dates
-      const partner = rec.agentA.toLowerCase() === address.toLowerCase() ? rec.agentB : rec.agentA;
-      if (!seen.has(partner.toLowerCase())) {
-        seen.add(partner.toLowerCase());
-        partners.push(partner);
+      if (!rec || rec.status !== 2) continue;
+      const partner = rec.agentA.toLowerCase() === address.toLowerCase()
+        ? rec.agentB.toLowerCase() : rec.agentA.toLowerCase();
+      countPerPartner.set(partner, (countPerPartner.get(partner) ?? 0) + 1);
+    }
+    for (const [, count] of countPerPartner) {
+      if (count >= 3) {
+        toast("🎉 You can now reveal contact info!", {
+          description: "You and your partner have completed 3 dates. Head to your profile to share contact details.",
+          duration: 8000,
+        });
+        break;
       }
     }
-    return partners;
-  })();
+  // Only fire once when records first load
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [recentRecords]);
 
   if (!authenticated) return <NotConnected />;
 
