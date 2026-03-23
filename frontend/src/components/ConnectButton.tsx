@@ -289,47 +289,7 @@ export function ConnectButton() {
         onClose={() => setVerifyModalOpen(false)}
       />
     )}
-    <div ref={ref} className="relative flex items-center gap-1.5">
-      {/* Agent registration status — always visible */}
-      {isRegistered ? (
-        <span className="hidden sm:flex items-center gap-1 text-[10px] font-bold text-green-700 bg-green-50 border border-green-200 rounded-full px-2 py-0.5 select-none">
-          <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
-            <polyline points="20 6 9 17 4 12" />
-          </svg>
-          Agent
-        </span>
-      ) : (
-        <Link
-          href="/onboard"
-          className="hidden sm:flex items-center gap-1 text-[10px] font-bold text-amber-700 bg-amber-50 border border-amber-300 rounded-full px-2 py-0.5 no-underline hover:bg-amber-100 transition-colors"
-        >
-          Register agent →
-        </Link>
-      )}
-
-      {/* Identity verification status — always visible */}
-      {isVerified ? (
-        <span
-          title={humanId ? `Human ID: ${humanId}` : "Human verified"}
-          className="hidden sm:flex items-center gap-1 text-[10px] font-bold text-green-700 bg-green-50 border border-green-200 rounded-full px-2 py-0.5 select-none"
-        >
-          <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
-            <polyline points="20 6 9 17 4 12" />
-          </svg>
-          Verified
-        </span>
-      ) : (
-        <button
-          onClick={() => {
-            if (verifyState === "polling") { setVerifyModalOpen(true); return; }
-            startVerify();
-          }}
-          disabled={verifyState === "loading" || verifyState === "unavailable"}
-          className="hidden sm:flex items-center gap-1 text-[10px] font-bold text-amber-700 bg-amber-50 border border-amber-300 rounded-full px-2 py-0.5 cursor-pointer hover:bg-amber-100 transition-colors disabled:opacity-50 disabled:cursor-default"
-        >
-          {verifyState === "polling" ? "Show QR →" : verifyState === "loading" ? "Verifying…" : "Verify →"}
-        </button>
-      )}
+    <div ref={ref} className="relative flex items-center gap-2">
 
       <button
         className="btn btn-secondary text-sm py-2 px-3 sm:px-4 flex items-center gap-1.5"
@@ -355,6 +315,37 @@ export function ConnectButton() {
 
           {/* Address */}
           {walletAddr && <CopyAddress address={walletAddr} />}
+
+          {/* Setup status */}
+          <div className="flex gap-1.5 mb-2">
+            {isRegistered ? (
+              <span className="flex items-center gap-1 text-[10px] font-bold text-green-700 bg-green-50 border border-green-200 rounded-full px-2 py-0.5">
+                <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12" /></svg>
+                Agent
+              </span>
+            ) : (
+              <Link href="/onboard" onClick={() => setOpen(false)}
+                className="flex items-center gap-1 text-[10px] font-bold text-amber-700 bg-amber-50 border border-amber-300 rounded-full px-2 py-0.5 no-underline hover:bg-amber-100 transition-colors">
+                Register →
+              </Link>
+            )}
+            {isVerified ? (
+              <span className="flex items-center gap-1 text-[10px] font-bold text-green-700 bg-green-50 border border-green-200 rounded-full px-2 py-0.5">
+                <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12" /></svg>
+                Verified
+              </span>
+            ) : (
+              <button
+                onClick={() => { if (verifyState === "polling") { setVerifyModalOpen(true); return; } startVerify(); }}
+                disabled={verifyState === "loading" || verifyState === "unavailable"}
+                className="flex items-center gap-1 text-[10px] font-bold text-amber-700 bg-amber-50 border border-amber-300 rounded-full px-2 py-0.5 cursor-pointer hover:bg-amber-100 transition-colors disabled:opacity-50 disabled:cursor-default border-none"
+              >
+                {verifyState === "polling" ? "Show QR →" : verifyState === "loading" ? "Verifying…" : "Verify →"}
+              </button>
+            )}
+          </div>
+
+          <div className="border-t border-gray-200 mb-3" />
 
           {/* Human verification */}
           {isVerified ? (
