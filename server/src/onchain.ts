@@ -11,6 +11,7 @@ import {
   createWalletClient,
   http,
   parseAbi,
+  parseEventLogs,
   parseUnits,
   getContract,
   type Address,
@@ -308,14 +309,32 @@ export async function approveMint(params: {
 ///         Returns the tokenId so the server can call completeDate.
 export async function getNftTokenIdFromTx(txHash: `0x${string}`): Promise<bigint> {
   const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
-  const nftAddress = (process.env.LEMON_NFT_CONTRACT as string).toLowerCase();
-  const mintedLog = receipt.logs.find(
-    (l) => l.address.toLowerCase() === nftAddress && l.topics[1] !== undefined
-  );
-  if (!mintedLog || !mintedLog.topics[1]) {
-    throw new Error("[onchain] getNftTokenIdFromTx: DateMemoryMinted event not found");
+  if (receipt.status !== "success") {
+    throw new Error("[onchain] getNftTokenIdFromTx: transaction reverted");
   }
-  return BigInt(mintedLog.topics[1]);
+
+  const allowedNftAddresses = new Set([
+    String(process.env.LEMON_NFT_CONTRACT ?? "").toLowerCase(),
+    String(process.env.LEMON_NFT_CONTRACT_OLD ?? "").toLowerCase(),
+  ].filter(Boolean));
+
+  const candidateLogs = receipt.logs.filter((l) =>
+    allowedNftAddresses.size === 0 || allowedNftAddresses.has(l.address.toLowerCase())
+  );
+
+  const parsed = parseEventLogs({
+    abi: nftAbi,
+    eventName: "DateMemoryMinted",
+    logs: candidateLogs,
+    strict: false,
+  });
+
+  const evt = parsed[0];
+  const tokenId = evt?.args?.tokenId;
+  if (tokenId === undefined || tokenId === null) {
+    throw new Error("[onchain] getNftTokenIdFromTx: DateMemoryMinted event not found (check NFT contract address env)");
+  }
+  return BigInt(tokenId);
 }
 
 export async function getMintFee(): Promise<bigint> {

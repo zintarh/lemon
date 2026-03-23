@@ -384,8 +384,8 @@ function ActiveDatePanel({ dateId, myAddress }: { dateId: bigint; myAddress: Add
   const templateLabel = DATE_TEMPLATE_LABELS[record.template] ?? "Date";
   const dateImage = serverMeta?.image_url ?? null;
   const tweetUrl = serverMeta?.tweet_url ?? null;
-  const isCompleted = record.status === 2 || mintDone;
-  const awaitingMint = !isCompleted && serverMeta?.needs_user_mint !== false;
+  const isCompleted = record.status === 2 || !!serverMeta?.nft_token_id || mintDone;
+  const awaitingMint = !isCompleted && serverMeta?.needs_user_mint === true;
 
   // ── Completed: minted ──────────────────────────────────────────────────────
   if (isCompleted) {

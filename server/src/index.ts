@@ -983,9 +983,21 @@ app.post("/api/date/:dateId/confirm-mint", async (req: Request, res: Response) =
     const nftTokenId = await getNftTokenIdFromTx(txHash as `0x${string}`);
     const owner = await ownerOfMemory(nftTokenId);
 
-    await completeDate(BigInt(id), nftTokenId);
+    try {
+      await completeDate(BigInt(id), nftTokenId);
+    } catch (e) {
+      // If already completed on-chain (or race), continue with reconciliation.
+      const msg = (e as Error).message ?? "";
+      const alreadyDone = /already|completed|invalid status/i.test(msg);
+      if (!alreadyDone) throw e;
+      console.warn("[confirm-mint] completeDate non-fatal:", msg);
+    }
 
-    const completedAt = Math.floor(Date.now() / 1000);
+    const chainDate = await readDateOnchain(BigInt(id)).catch(() => null);
+    const chainCompletedAt =
+      chainDate && Number(chainDate.status) === 2 ? Number(chainDate.completedAt || 0n) : 0;
+
+    const completedAt = chainCompletedAt > 0 ? chainCompletedAt : Math.floor(Date.now() / 1000);
     await dbUpdateDate(id, {
       status: 2,
       nft_token_id: nftTokenId.toString(),
