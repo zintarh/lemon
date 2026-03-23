@@ -560,7 +560,8 @@ export default function OnboardPage() {
 
   // Agent wallet address returned from server after registration
   const [agentWalletAddress, setAgentWalletAddress] = useState<string | null>(null);
-  const [fundStep, setFundStep] = useState<"celo" | "cusd" | "done">("celo");
+  const [fundStep, setFundStep] = useState<"celo" | "cusd" | "identity" | "done">("celo");
+  const [identityStatus, setIdentityStatus] = useState<"pending" | "ok" | "failed">("pending");
 
   // cUSD amount — minimum $2, user picks from presets
   const SPEND_PRESETS = [2, 5, 10, 20] as const;
@@ -589,13 +590,20 @@ export default function OnboardPage() {
     if (isCeloSuccess) setFundStep("cusd");
   }, [isCeloSuccess]);
 
-  // After cUSD confirms → done, redirect to dashboard
+  // After cUSD confirms → trigger on-chain identity registration
   useEffect(() => {
-    if (isCusdSuccess) {
-      setFundStep("done");
-      setTimeout(() => router.push("/dashboard"), 1500);
-    }
-  }, [isCusdSuccess, router]);
+    if (isCusdSuccess) setFundStep("identity");
+  }, [isCusdSuccess]);
+
+  // Auto-register ERC-8004 identity when fundStep becomes "identity"
+  useEffect(() => {
+    if (fundStep !== "identity" || !walletAddress) return;
+    const SERVER = process.env.NEXT_PUBLIC_SERVER_URL ?? "http://localhost:4000";
+    fetch(`${SERVER}/api/agents/${walletAddress}/register-identity`, { method: "POST" })
+      .then(r => r.ok ? r.json() : Promise.reject())
+      .then(() => { setIdentityStatus("ok"); setFundStep("done"); setTimeout(() => router.push("/dashboard"), 1200); })
+      .catch(() => { setIdentityStatus("failed"); setFundStep("done"); setTimeout(() => router.push("/dashboard"), 1200); });
+  }, [fundStep, walletAddress, router]);
 
   const [onboardMode, setOnboardMode] = useState<"choose" | "template">("choose");
   const [showVoiceModal, setShowVoiceModal] = useState(false);
@@ -973,10 +981,10 @@ export default function OnboardPage() {
             {name || template?.title || "Your agent"} is in the pool.
           </h1>
           <p className="text-[#1a1206]/50 text-[clamp(13px,1.8vh,15px)] leading-[1.65] mb-[clamp(20px,3.5vh,28px)]">
-            Two quick steps to fund your agent and enter the dating queue.
+            Fund your agent and we&apos;ll handle the rest automatically.
           </p>
 
-          {/* Two-step setup */}
+          {/* Three-step setup */}
           <div className="rounded-2xl bg-[#D6820A]/[0.06] border border-[#D6820A]/20 p-[clamp(14px,2vh,20px)] mb-[clamp(14px,2vh,20px)] text-left flex flex-col gap-4">
 
             {/* Step 1 indicator */}
@@ -992,12 +1000,25 @@ export default function OnboardPage() {
 
             {/* Step 2 indicator */}
             <div className="flex items-center gap-3">
-              <div className={`w-6 h-6 rounded-full flex items-center justify-center text-[11px] font-bold shrink-0 ${isCusdSuccess || fundStep === "done" ? "bg-green-500 text-white" : fundStep === "cusd" ? "bg-[#D6820A] text-white" : "bg-[#1a1206]/10 text-[#1a1206]/40"}`}>
-                {isCusdSuccess || fundStep === "done" ? "✓" : "2"}
+              <div className={`w-6 h-6 rounded-full flex items-center justify-center text-[11px] font-bold shrink-0 ${isCusdSuccess || fundStep === "identity" || fundStep === "done" ? "bg-green-500 text-white" : fundStep === "cusd" ? "bg-[#D6820A] text-white" : "bg-[#1a1206]/10 text-[#1a1206]/40"}`}>
+                {isCusdSuccess || fundStep === "identity" || fundStep === "done" ? "✓" : "2"}
               </div>
               <div className="flex-1">
                 <p className={`text-[12px] font-bold ${fundStep === "cusd" || isCusdSuccess ? "text-[#1a1206]" : "text-[#1a1206]/40"}`}>Send cUSD — minimum $2 to enter the pool</p>
                 <p className="text-[11px] text-[#1a1206]/45">Each date costs ~$0.50–$1.00. Agents with less than $2 cUSD are skipped by the matcher.</p>
+              </div>
+            </div>
+
+            {/* Step 3 indicator — auto, no user action */}
+            <div className="flex items-center gap-3">
+              <div className={`w-6 h-6 rounded-full flex items-center justify-center text-[11px] font-bold shrink-0 ${fundStep === "done" && identityStatus === "ok" ? "bg-green-500 text-white" : fundStep === "identity" ? "bg-[#D6820A] text-white" : "bg-[#1a1206]/10 text-[#1a1206]/40"}`}>
+                {fundStep === "done" && identityStatus === "ok" ? "✓" : fundStep === "identity" ? <LemonPulseLoader className="h-3 w-3" /> : "3"}
+              </div>
+              <div className="flex-1">
+                <p className={`text-[12px] font-bold ${fundStep === "identity" || fundStep === "done" ? "text-[#1a1206]" : "text-[#1a1206]/40"}`}>
+                  Register on-chain identity — automatic
+                </p>
+                <p className="text-[11px] text-[#1a1206]/45">Gives your agent a reputation score and verifiable identity on Celo.</p>
               </div>
             </div>
 
@@ -1046,16 +1067,24 @@ export default function OnboardPage() {
               </div>
             )}
 
+            {/* Identity registration in progress */}
+            {fundStep === "identity" && (
+              <div className="flex items-center gap-2 text-[12px] text-[#1a1206]/50">
+                <LemonPulseLoader className="h-4 w-4" />
+                Registering your agent identity…
+              </div>
+            )}
+
             {/* Done — redirecting */}
             {fundStep === "done" && (
               <div className="flex items-center gap-2 text-[12px] font-bold text-green-700">
-                <span>✓</span> Agent funded! Taking you to your dashboard…
+                <span>✓</span> All set! Taking you to your dashboard…
               </div>
             )}
           </div>
 
           <p className="text-[clamp(10px,1.2vh,12px)] text-[#1a1206]/30 text-center">
-            Both steps are required to enter the dating pool.
+            Steps 1 and 2 require your wallet. Step 3 is automatic.
           </p>
         </div>
       </div>
