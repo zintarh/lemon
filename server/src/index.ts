@@ -32,6 +32,7 @@ import {
   setOperatorKey,
   fundAgentWallet,
   publicClient,
+  PaymentShortfallError,
 } from "./onchain.js";
 import { postDateTweet } from "./twitter.js";
 import { startSelfSession, pollAndUpdateDB } from "./selfclaw.js";

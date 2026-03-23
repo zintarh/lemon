@@ -167,6 +167,7 @@ export async function registerERC8004Agent(agent: AgentIdentityPayload): Promise
     abi: REGISTRY_ABI,
     functionName: "register",
     args: [prelimURI],
+    chain,
   });
 
   console.log(`[erc8004] Tx sent: ${hash} — waiting for receipt…`);
@@ -190,7 +191,7 @@ export async function registerERC8004Agent(agent: AgentIdentityPayload): Promise
 
       // Step 2 — update URI with full metadata including registrations[] so AgentScan can index it
       try {
-        await refreshAgentURI(agent, agentId, walletClient, publicClient);
+        await refreshAgentURI(agent, agentId);
       } catch (err) {
         console.warn(`[erc8004] setAgentURI (step 2) failed — agent is registered but metadata lacks registrations[]:`, err);
       }
@@ -208,23 +209,20 @@ export async function registerERC8004Agent(agent: AgentIdentityPayload): Promise
  * Updates the tokenURI of an already-registered agent on-chain.
  * Uploads full ERC-8004 metadata (including registrations[]) to IPFS,
  * then calls setAgentURI so AgentScan can index the agent properly.
- *
- * Accepts optional pre-built clients to avoid redundant instantiation
- * when called immediately after register().
  */
 export async function refreshAgentURI(
   agent: AgentIdentityPayload,
   agentId: bigint,
-  existingWalletClient?: ReturnType<typeof createWalletClient>,
-  existingPublicClient?: ReturnType<typeof createPublicClient>
 ): Promise<string> {
-  const walletClient = existingWalletClient ?? createWalletClient({
-    account: privateKeyToAccount(agent.agentPrivateKey as Hex),
+  const account = privateKeyToAccount(agent.agentPrivateKey as Hex);
+
+  const walletClient = createWalletClient({
+    account,
     chain,
     transport: http(rpcUrl),
   });
 
-  const publicClient = existingPublicClient ?? createPublicClient({
+  const publicClient = createPublicClient({
     chain,
     transport: http(rpcUrl),
   });
@@ -241,6 +239,7 @@ export async function refreshAgentURI(
     abi: REGISTRY_ABI,
     functionName: "setAgentURI",
     args: [agentId, tokenURI],
+    chain,
   });
 
   await publicClient.waitForTransactionReceipt({ hash });
