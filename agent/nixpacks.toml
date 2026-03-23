@@ -1,8 +1,11 @@
+[variables]
+NIXPACKS_NODE_VERSION = "20"
+
 [phases.install]
 cmds = ["npm install"]
 
 [phases.build]
-cmds = ["npm run build"]
+cmds = []
 
 [start]
-cmd = "node dist/index.js"
+cmd = "node --no-deprecation --import tsx/esm agent/src/index.ts"
