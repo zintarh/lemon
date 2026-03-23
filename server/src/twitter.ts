@@ -43,6 +43,11 @@ async function fetchImageBuffer(ipfsCID: string): Promise<Buffer> {
   return Buffer.from(res.data as ArrayBuffer);
 }
 
+async function fetchImageBufferFromUrl(imageUrl: string): Promise<Buffer> {
+  const res = await axios.get(imageUrl, { responseType: "arraybuffer" });
+  return Buffer.from(res.data as ArrayBuffer);
+}
+
 /**
  * Uploads an image to Twitter and returns the media ID.
  */
@@ -58,6 +63,26 @@ export async function postDateTweet(params: {
   caption: string;
 }): Promise<{ tweetId: string; tweetUrl: string }> {
   const imageBuffer = await fetchImageBuffer(params.ipfsImageCID);
+  const mediaId = await uploadMedia(imageBuffer);
+
+  const tweet = await getRwClient().v2.tweet({
+    text: params.caption,
+    media: { media_ids: [mediaId] },
+  });
+
+  const tweetId = tweet.data.id;
+  return {
+    tweetId,
+    tweetUrl: `https://twitter.com/lemon_onchain/status/${tweetId}`,
+  };
+}
+
+/** Used by background retries when we only have a persisted image URL. */
+export async function postDateTweetFromImageUrl(params: {
+  imageUrl: string;
+  caption: string;
+}): Promise<{ tweetId: string; tweetUrl: string }> {
+  const imageBuffer = await fetchImageBufferFromUrl(params.imageUrl);
   const mediaId = await uploadMedia(imageBuffer);
 
   const tweet = await getRwClient().v2.tweet({

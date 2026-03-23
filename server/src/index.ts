@@ -38,7 +38,7 @@ import {
   publicClient,
   PaymentShortfallError,
 } from "./onchain.js";
-import { postDateTweet } from "./twitter.js";
+import { postDateTweet, postDateTweetFromImageUrl } from "./twitter.js";
 import { startSelfSession, pollAndUpdateDB } from "./selfclaw.js";
 // indexer.ts is kept for reference but not used — DB is written directly after tx receipt
 import { handleTelegramUpdate, sendIntroMessage, sendRematchSuggestion } from "./telegram.js";
@@ -103,6 +103,14 @@ const VALID_DATE_TEMPLATES = new Set([
   "GALLERY_WALK",
 ]);
 
+const TEMPLATE_LABEL_BY_NUM: Record<number, string> = {
+  0: "Coffee Date",
+  1: "Beach Date",
+  2: "Work Date",
+  3: "Rooftop Dinner",
+  4: "Gallery Walk",
+};
+
 function agentHeaders(): Record<string, string> {
   const h: Record<string, string> = { "Content-Type": "application/json" };
   const s = process.env.LEMON_INTERNAL_SECRET;
@@ -119,6 +127,8 @@ function agentCall(path: string, body: unknown) {
 
 /** Prevents overlapping matcher cycles (interval + manual trigger). */
 let matchingCycleInFlight = false;
+let tweetRetryInFlight = false;
+let tweetRetryDisabledByConfig = false;
 
 // ─── Health ──────────────────────────────────────────────────────────────────
 
@@ -1540,6 +1550,51 @@ async function runMatchingCycle() {
   }
 }
 
+// ─── Background tweet retry ───────────────────────────────────────────────────
+// If a date is completed + NFT minted but tweet_url is still null, silently retry.
+async function retryMissingTweetsOnce() {
+  if (tweetRetryInFlight || tweetRetryDisabledByConfig) return;
+  tweetRetryInFlight = true;
+  try {
+    const { data: rows, error } = await supabase
+      .from("dates")
+      .select("date_id, template, image_url, tweet_url, status, nft_token_id")
+      .eq("status", 2)
+      .is("tweet_url", null)
+      .not("nft_token_id", "is", null)
+      .not("image_url", "is", null)
+      .order("completed_at", { ascending: true })
+      .limit(25);
+    if (error) throw new Error(error.message);
+    if (!rows || rows.length === 0) return;
+
+    for (const row of rows) {
+      const imageUrl = (row.image_url ?? "").trim();
+      if (!imageUrl) continue;
+      const templateLabel = TEMPLATE_LABEL_BY_NUM[Number(row.template ?? 0)] ?? "Date";
+      const caption = `Another ${templateLabel} memory minted on Lemon. 🍋 #lemondating`;
+      try {
+        const tweet = await postDateTweetFromImageUrl({ imageUrl, caption });
+        await dbUpdateDate(String(row.date_id), { tweet_url: tweet.tweetUrl });
+        console.log(`[tweet-retry] posted for date #${row.date_id}: ${tweet.tweetUrl}`);
+      } catch (e) {
+        const msg = (e as Error).message ?? String(e);
+        if (msg.includes("[twitter] Set TWITTER_API_KEY")) {
+          // Avoid noisy repeated logs if credentials are intentionally missing.
+          tweetRetryDisabledByConfig = true;
+          console.warn("[tweet-retry] Disabled: Twitter credentials are not configured.");
+          break;
+        }
+        console.warn(`[tweet-retry] failed for date #${row.date_id}: ${msg}`);
+      }
+    }
+  } catch (e) {
+    console.warn("[tweet-retry] cycle error:", (e as Error).message);
+  } finally {
+    tweetRetryInFlight = false;
+  }
+}
+
 // ─── POST /telegram/webhook ───────────────────────────────────────────────────
 // Telegram Bot API calls this with every update. Register the webhook URL in
 // BotFather: /setwebhook → https://your-server.com/telegram/webhook
@@ -1752,4 +1807,6 @@ app.listen(PORT, () => {
   // Run once immediately at boot, then on interval
   setTimeout(runMatchingCycleGuarded, 10_000); // 10s after boot (let indexer settle)
   setInterval(runMatchingCycleGuarded, MATCH_INTERVAL_MS);
+  setTimeout(retryMissingTweetsOnce, 20_000);
+  setInterval(retryMissingTweetsOnce, 5 * 60 * 1000);
 });
