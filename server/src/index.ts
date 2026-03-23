@@ -1073,7 +1073,11 @@ async function runMatchingCycle() {
     const { privateKeyToAddress } = await import("viem/accounts");
     const fundedAgents: typeof allAgents = [];
     for (const a of allAgents) {
-      if (!a.agent_private_key) continue;
+      if (!a.agent_private_key) {
+        console.log(`[matcher] Warning: ${a.name} (${a.wallet.slice(0, 8)}) has no agent private key — including anyway, balance unknown`);
+        fundedAgents.push(a); // include: agent went through onboarding, assume funded
+        continue;
+      }
       try {
         const addr = privateKeyToAddress(a.agent_private_key as `0x${string}`);
         const bal = await publicClient.readContract({
@@ -1088,7 +1092,8 @@ async function runMatchingCycle() {
           console.log(`[matcher] Skipping ${a.name} (${a.wallet.slice(0, 8)}) — agent wallet has ${formatUnits(bal, 18)} cUSD (needs ≥ 2)`);
         }
       } catch {
-        // Can't check balance — exclude to be safe
+        console.log(`[matcher] Warning: could not check balance for ${a.name} (${a.wallet.slice(0, 8)}) — including anyway`);
+        fundedAgents.push(a); // include: RPC error shouldn't block matching
       }
     }
 

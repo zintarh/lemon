@@ -123,6 +123,10 @@ Return only the JSON object, nothing else.
 /**
  * Main matching function. Takes a list of active agent profiles and returns
  * viable match pairs sorted by compatibility score (highest first).
+ *
+ * Availability-first: any two funded, available agents are matched regardless
+ * of personality score. AI scoring is attempted for ordering only — if it
+ * fails the pair is still viable with a default score of 50.
  */
 export async function findMatches(agents: AgentProfile[]): Promise<MatchResult[]> {
   const results: MatchResult[] = [];
@@ -132,23 +136,27 @@ export async function findMatches(agents: AgentProfile[]): Promise<MatchResult[]
       const agentA = agents[i];
       const agentB = agents[j];
 
-      const [conflicts, compat] = await Promise.all([
-        checkDealBreakers(agentA, agentB),
-        scoreCompatibility(agentA, agentB),
-      ]);
+      // AI scoring for ordering only — never blocks a match
+      let score = 50;
+      let sharedInterests: string[] = [];
+      try {
+        const compat = await scoreCompatibility(agentA, agentB);
+        score = compat.score;
+        sharedInterests = compat.sharedInterests;
+      } catch {
+        // AI unavailable — default score, pair is still viable
+      }
 
       results.push({
         agentA: agentA.wallet,
         agentB: agentB.wallet,
-        compatibilityScore: compat.score,
-        sharedInterests: compat.sharedInterests,
-        dealBreakerConflicts: conflicts,
-        viable: conflicts.length === 0 && compat.score >= 40,
+        compatibilityScore: score,
+        sharedInterests,
+        dealBreakerConflicts: [],
+        viable: true, // availability + funding is the only gate
       });
     }
   }
 
-  return results
-    .filter((r) => r.viable)
-    .sort((a, b) => b.compatibilityScore - a.compatibilityScore);
+  return results.sort((a, b) => b.compatibilityScore - a.compatibilityScore);
 }
