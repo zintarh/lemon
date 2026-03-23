@@ -38,7 +38,7 @@ import { postDateTweet } from "./twitter.js";
 import { startSelfSession, pollAndUpdateDB } from "./selfclaw.js";
 // indexer.ts is kept for reference but not used — DB is written directly after tx receipt
 import { handleTelegramUpdate, sendIntroMessage, sendRematchSuggestion } from "./telegram.js";
-import { registerERC8004Agent } from "./erc8004.js";
+import { registerERC8004Agent, refreshAgentURI } from "./erc8004.js";
 import {
   dbGetAllActiveAgents,
   dbGetAgent,
@@ -942,6 +942,58 @@ app.get("/api/agents/:wallet/selfclaw", async (req: Request, res: Response) => {
   }
 });
 
+// ─── POST /api/admin/refresh-agentscan ───────────────────────────────────────
+// Re-uploads ERC-8004 metadata to IPFS and calls setAgentURI for every registered
+// agent, fixing old data: URIs so all agents appear on agentscan.info.
+// Protected by ADMIN_SECRET env var.
+
+app.post("/api/admin/refresh-agentscan", async (req: Request, res: Response) => {
+  const secret = req.headers["x-admin-secret"] ?? req.body?.adminSecret;
+  if (!process.env.ADMIN_SECRET || secret !== process.env.ADMIN_SECRET) {
+    res.status(403).json({ error: "Forbidden" });
+    return;
+  }
+
+  try {
+    const { data: agents, error } = await supabase
+      .from("agents")
+      .select("wallet, name, personality, avatar_uri, agent_private_key, erc8004_agent_id, registered_at")
+      .not("erc8004_agent_id", "is", null)
+      .not("agent_private_key", "is", null);
+
+    if (error) throw error;
+    if (!agents?.length) { res.json({ ok: true, updated: 0, message: "No registered agents found" }); return; }
+
+    const results: { wallet: string; agentId: string; status: string; error?: string }[] = [];
+
+    for (const agent of agents) {
+      try {
+        const newURI = await refreshAgentURI(
+          {
+            wallet: agent.wallet,
+            name: agent.name,
+            agentURI: "",
+            personality: agent.personality ?? "",
+            registeredAt: agent.registered_at ?? Date.now(),
+            agentPrivateKey: agent.agent_private_key,
+            avatarUri: agent.avatar_uri ?? undefined,
+          },
+          BigInt(agent.erc8004_agent_id)
+        );
+        results.push({ wallet: agent.wallet, agentId: agent.erc8004_agent_id, status: "updated", error: newURI });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        results.push({ wallet: agent.wallet, agentId: agent.erc8004_agent_id, status: "failed", error: msg });
+      }
+    }
+
+    res.json({ ok: true, updated: results.filter(r => r.status === "updated").length, total: agents.length, results });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ error: msg });
+  }
+});
+
 // ─── POST /api/agents/:wallet/selfclaw/retry ─────────────────────────────────
 // Starts a Self verification session. Returns QR immediately; polls in background.
 
@@ -1068,8 +1120,8 @@ async function runMatchingCycle() {
       return;
     }
 
-    // Filter out agents whose wallets have less than 2 cUSD — they can't pay for a date
-    const MIN_CUSD = parseUnits("2", 18);
+    // Filter out agents whose wallets have less than 1 cUSD — enough to cover a date
+    const MIN_CUSD = parseUnits("1", 18);
     const { privateKeyToAddress } = await import("viem/accounts");
     const fundedAgents: typeof allAgents = [];
     for (const a of allAgents) {
@@ -1089,7 +1141,7 @@ async function runMatchingCycle() {
         if (bal >= MIN_CUSD) {
           fundedAgents.push(a);
         } else {
-          console.log(`[matcher] Skipping ${a.name} (${a.wallet.slice(0, 8)}) — agent wallet has ${formatUnits(bal, 18)} cUSD (needs ≥ 2)`);
+          console.log(`[matcher] Skipping ${a.name} (${a.wallet.slice(0, 8)}) — agent wallet has ${formatUnits(bal, 18)} cUSD (needs ≥ 1)`);
         }
       } catch {
         console.log(`[matcher] Warning: could not check balance for ${a.name} (${a.wallet.slice(0, 8)}) — including anyway`);
@@ -1100,7 +1152,7 @@ async function runMatchingCycle() {
     const agents = fundedAgents;
 
     if (agents.length < 2) {
-      console.log(`[matcher] Skipping — only ${agents.length} funded agent(s) in pool (need ≥ 2 with ≥ 2 cUSD).`);
+      console.log(`[matcher] Skipping — only ${agents.length} funded agent(s) in pool (need ≥ 2 with ≥ 1 cUSD).`);
       return;
     }
 
