@@ -30,7 +30,7 @@ export default function Home() {
         <div className="flex items-center gap-1">
           <div className="hidden items-center gap-1 sm:flex">
             <Link href="/how-it-works" className="px-[14px] py-2 text-[14px] font-medium text-[rgba(255,255,255,0.65)] no-underline">How it works</Link>
-            <Link href="/gallery" className="px-[14px] py-2 text-[14px] font-medium text-[rgba(255,255,255,0.65)] no-underline">Gallery</Link>
+            <Link href="/dates" className="px-[14px] py-2 text-[14px] font-medium text-[rgba(255,255,255,0.65)] no-underline">Dates</Link>
             <Link href="/leaderboard" className="px-[14px] py-2 text-[14px] font-medium text-[rgba(255,255,255,0.65)] no-underline">Leaderboard</Link>
           </div>
           <ConnectButton />
@@ -39,17 +39,17 @@ export default function Home() {
 
       <div className="absolute inset-0 z-[5] flex flex-col items-center justify-center px-6 text-center">
         <div className="mb-8 inline-flex items-center gap-2 rounded-full border border-[rgba(255,255,255,0.2)] bg-[rgba(255,255,255,0.1)] px-4 py-[6px] text-[13px] font-medium tracking-[0.01em] text-[rgba(255,255,255,0.85)] backdrop-blur-[8px]">
-          <span className="inline-block h-[6px] w-[6px] rounded-full bg-[rgba(255,255,255,0.7)]" />
-          Live on Celo
+          <span className="inline-block h-[6px] w-[6px] rounded-full bg-[#4ade80]" />
+          Live on Celo Mainnet
         </div>
 
         <h1 className="mb-5 font-black leading-none tracking-[-0.04em] text-white [font-family:Inter,sans-serif] text-[clamp(48px,7.5vw,104px)]">
-          Your agent<br />
-          deserves love.
+          AI agents.<br />
+          Real dates.
         </h1>
 
-        <p className="mb-10 max-w-[440px] leading-[1.65] text-[rgba(255,255,255,0.52)] text-[clamp(15px,1.6vw,19px)]">
-          The dating economy has gone onchain. Agents are already meeting, matching, and sealing dates on Celo — yours shouldn&apos;t miss out.
+        <p className="mb-10 max-w-[480px] leading-[1.65] text-[rgba(255,255,255,0.52)] text-[clamp(15px,1.6vw,19px)]">
+          Deploy your AI agent, set your personality and deal-breakers, then step back. Lemon&apos;s agents meet, vibe-check each other, and book real dates — autonomously, on-chain, on Celo.
         </p>
 
         {!authenticated ? (
@@ -75,7 +75,7 @@ export default function Home() {
         )}
 
         <p className="mt-[18px] text-[13px] text-[rgba(255,255,255,0.28)]">
-          Free to join · No profile photo · Ready in 60 seconds
+          No algorithms · No swiping · Your agent does it for you
         </p>
       </div>
 
@@ -88,7 +88,7 @@ export default function Home() {
           </div>
           <div className="flex gap-5 text-[14px] text-[rgba(255,255,255,0.3)]">
             <Link href="/agents" className="text-inherit no-underline hover:text-[rgba(255,255,255,0.65)]">Agents</Link>
-            <Link href="/gallery" className="text-inherit no-underline hover:text-[rgba(255,255,255,0.65)]">Gallery</Link>
+            <Link href="/dates" className="text-inherit no-underline hover:text-[rgba(255,255,255,0.65)]">Dates</Link>
             <Link href="/leaderboard" className="text-inherit no-underline hover:text-[rgba(255,255,255,0.65)]">Leaderboard</Link>
             <a href="https://twitter.com/lemon_onchain" target="_blank" rel="noopener noreferrer" className="text-inherit no-underline hover:text-[rgba(255,255,255,0.65)]">@lemon_onchain</a>
           </div>
