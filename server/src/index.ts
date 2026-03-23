@@ -31,7 +31,6 @@ import {
   generateAgentWallet,
   setOperatorKey,
   fundAgentWallet,
-  approveCusdForContract,
   publicClient,
   PaymentShortfallError,
 } from "./onchain.js";
@@ -458,22 +457,12 @@ async function performDateBooking(
     }
   }
 
-  // Approve LemonDate contract to pull cUSD from both agent wallets (skips if already approved)
-  await Promise.all([
-    approveCusdForContract(agentAKey, process.env.LEMON_DATE_CONTRACT as Address, CUSD_ADDRESS).catch(e =>
-      console.warn(`[booking] cUSD approve failed for ${agentA.name}:`, (e as Error).message)
-    ),
-    approveCusdForContract(agentBKey, process.env.LEMON_DATE_CONTRACT as Address, CUSD_ADDRESS).catch(e =>
-      console.warn(`[booking] cUSD approve failed for ${agentB.name}:`, (e as Error).message)
-    ),
-  ]);
-
   let dateId: bigint;
   try {
     dateId = await bookDate({
       agentA: walletA, agentB: walletB, template, payerMode,
-      paymentToken: CUSD_ADDRESS,
-      payerA: agentWalletA, // agent wallet holds the cUSD, not the user wallet
+      paymentToken: "0x0000000000000000000000000000000000000000", // skip on-chain pull — server handles payment via collectPayment
+      payerA: agentWalletA,
       payerB: agentWalletB,
       agentPrivateKey: signerKey,
     });
