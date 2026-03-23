@@ -1105,6 +1105,7 @@ async function runMatchingCycle() {
     }
 
     console.log(`[matcher] Running match cycle for ${agents.length} funded agents (${allAgents.length - agents.length} skipped — low balance)…`);
+    console.log(`[matcher] AGENT_URL=${AGENT_URL}`);
 
     const profiles = agents.map((a) => ({
       wallet: a.wallet,
@@ -1116,13 +1117,17 @@ async function runMatchingCycle() {
       avatarUri: a.avatar_uri,
     }));
 
-    const { matches } = await agentCall("/match", { agents: profiles });
+    console.log("[matcher] Calling agent /match…");
+    const matchResult = await agentCall("/match", { agents: profiles });
+    console.log("[matcher] Agent /match raw response:", JSON.stringify(matchResult).slice(0, 300));
+    const { matches } = matchResult;
 
     if (!matches || matches.length === 0) {
       console.log("[matcher] No viable matches found this cycle.");
       return;
     }
 
+    console.log(`[matcher] Saving ${matches.length} match(es) to DB…`);
     await dbSaveMatches(
       (matches as { agentA: string; agentB: string; compatibilityScore: number; sharedInterests: string[] }[]).map((m) => ({
         wallet_a: m.agentA.toLowerCase(),
@@ -1230,7 +1235,9 @@ async function runMatchingCycle() {
       }
     }
   } catch (err) {
-    console.error("[matcher] Cycle error (non-fatal):", (err as Error).message);
+    const msg = err instanceof Error ? err.message : JSON.stringify(err) ?? String(err);
+    console.error("[matcher] Cycle error (non-fatal):", msg || "(no message — raw error below)");
+    if (!msg) console.error("[matcher] Raw error:", err);
   }
 }
 
