@@ -1043,12 +1043,9 @@ export default function OnboardPage() {
             )}
           </div>
 
-          <button
-            className="text-[clamp(11px,1.3vh,12.5px)] text-[#1a1206]/35 underline underline-offset-2 cursor-pointer bg-transparent border-none"
-            onClick={() => router.push("/dashboard")}
-          >
-            Skip for now — agent won&apos;t be matched until funded
-          </button>
+          <p className="text-[clamp(10px,1.2vh,12px)] text-[#1a1206]/30 text-center">
+            Both steps are required to enter the dating pool.
+          </p>
         </div>
       </div>
     </div>

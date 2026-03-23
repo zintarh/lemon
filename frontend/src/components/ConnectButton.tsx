@@ -7,6 +7,7 @@ import { useAccount, useBalance } from "wagmi";
 import { formatUnits } from "viem";
 import Link from "next/link";
 import { LemonPulseLoader } from "@/components/LemonPulseLoader";
+import { useIsRegistered } from "@/hooks/useAgentProfile";
 
 const SERVER = process.env.NEXT_PUBLIC_SERVER_URL ?? "http://localhost:4000";
 
@@ -254,6 +255,7 @@ export function ConnectButton() {
   }, []);
 
   const isMainnet = chainId === 42220;
+  const { data: isRegistered } = useIsRegistered(address);
 
   const { data: celoBalance } = useBalance({ address, query: { enabled: !!address } });
   const { data: cusdcBalance } = useBalance({
@@ -287,18 +289,46 @@ export function ConnectButton() {
         onClose={() => setVerifyModalOpen(false)}
       />
     )}
-    <div ref={ref} className="relative flex items-center gap-2">
-      {/* Verified badge shown next to the button when verified */}
-      {isVerified && (
+    <div ref={ref} className="relative flex items-center gap-1.5">
+      {/* Agent registration status — always visible */}
+      {isRegistered ? (
+        <span className="hidden sm:flex items-center gap-1 text-[10px] font-bold text-green-700 bg-green-50 border border-green-200 rounded-full px-2 py-0.5 select-none">
+          <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+            <polyline points="20 6 9 17 4 12" />
+          </svg>
+          Agent
+        </span>
+      ) : (
+        <Link
+          href="/onboard"
+          className="hidden sm:flex items-center gap-1 text-[10px] font-bold text-amber-700 bg-amber-50 border border-amber-300 rounded-full px-2 py-0.5 no-underline hover:bg-amber-100 transition-colors"
+        >
+          Register agent →
+        </Link>
+      )}
+
+      {/* Identity verification status — always visible */}
+      {isVerified ? (
         <span
           title={humanId ? `Human ID: ${humanId}` : "Human verified"}
-          className="flex items-center gap-1 text-[10px] font-bold text-green-700 bg-green-50 border border-green-200 rounded-full px-2 py-0.5 select-none"
+          className="hidden sm:flex items-center gap-1 text-[10px] font-bold text-green-700 bg-green-50 border border-green-200 rounded-full px-2 py-0.5 select-none"
         >
           <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
             <polyline points="20 6 9 17 4 12" />
           </svg>
           Verified
         </span>
+      ) : (
+        <button
+          onClick={() => {
+            if (verifyState === "polling") { setVerifyModalOpen(true); return; }
+            startVerify();
+          }}
+          disabled={verifyState === "loading" || verifyState === "unavailable"}
+          className="hidden sm:flex items-center gap-1 text-[10px] font-bold text-amber-700 bg-amber-50 border border-amber-300 rounded-full px-2 py-0.5 cursor-pointer hover:bg-amber-100 transition-colors disabled:opacity-50 disabled:cursor-default"
+        >
+          {verifyState === "polling" ? "Show QR →" : verifyState === "loading" ? "Verifying…" : "Verify →"}
+        </button>
       )}
 
       <button
