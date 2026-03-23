@@ -373,6 +373,19 @@ type LiveMessage = {
   phase?: "chat" | "proposal" | "accepted";
 };
 
+type PaymentApproval = {
+  fundedWallet: string;
+  fundedAgentName: string;
+  shortWallet: string;
+  shortAgentName: string;
+  shortAgentWalletAddress: string;
+  shortHas: string;
+  shortNeeds: string;
+  fullAmountUSD: string;
+  status: "pending" | "approved" | "declined" | "expired";
+  expiresAt: number;
+};
+
 type LiveConvoData = {
   wallet_a: string;
   wallet_b: string;
@@ -383,6 +396,7 @@ type LiveConvoData = {
   bookingError?: string | null;
   bookingPending?: boolean;
   bookingComplete?: boolean;
+  paymentApproval?: PaymentApproval | null;
   isStale?: boolean;
   lastMessageAt?: number | null;
 };
@@ -495,12 +509,40 @@ function LiveConversationPanel({
   const bookingPending = convo.bookingPending ?? false;
   const bookingComplete = convo.bookingComplete ?? false;
   const bookingError = convo.bookingError ?? null;
+  const paymentApproval = convo.paymentApproval ?? null;
 
   const [retrying, setRetrying] = useState(false);
   const [dismissed, setDismissed] = useState(false);
+  const [approvalLoading, setApprovalLoading] = useState(false);
 
   const amIwallet_a = myAddress?.toLowerCase() === convo.wallet_a.toLowerCase();
   const partnerName = amIwallet_a ? nameB : nameA;
+
+  const iAmFundedParty = paymentApproval?.status === "pending" &&
+    myAddress?.toLowerCase() === paymentApproval.fundedWallet.toLowerCase();
+  const iAmShortParty = paymentApproval?.status === "pending" &&
+    myAddress?.toLowerCase() === paymentApproval.shortWallet.toLowerCase();
+
+  async function handleApprovalResponse(approve: boolean) {
+    if (!myAddress) return;
+    setApprovalLoading(true);
+    try {
+      const r = await fetch(`${SERVER_URL}/api/payment-approval/respond`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ wallet: myAddress, approve }),
+      });
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({}));
+        toast.error("Failed", { description: (err as { error?: string }).error ?? r.statusText });
+      } else {
+        toast.success(approve ? "Covering the date — booking in progress!" : "Date cancelled");
+      }
+    } catch {
+      toast.error("Could not reach server");
+    }
+    setApprovalLoading(false);
+  }
 
   async function handleRetry() {
     setRetrying(true);
@@ -556,6 +598,10 @@ function LiveConversationPanel({
 
   const phaseLabel = isStale
     ? "⚠️ Conversation stalled"
+    : paymentApproval?.status === "pending" && iAmFundedParty
+    ? "💳 Your match needs help paying"
+    : paymentApproval?.status === "pending" && iAmShortParty
+    ? "⏳ Waiting for your match to respond"
     : convo.passed && bookingError
     ? "⚠️ Booking failed"
     : convo.passed && bookingPending
@@ -655,7 +701,9 @@ function LiveConversationPanel({
       {/* ── Booking status card ── */}
       {convo.passed && templateDetail && !dismissed && (
         <div className={`shrink-0 rounded-2xl border p-4 flex flex-col gap-3 ${
-          bookingError ? "border-red-200 bg-red-50"
+          paymentApproval?.status === "pending" && iAmFundedParty ? "border-amber-300 bg-amber-50"
+          : paymentApproval?.status === "pending" && iAmShortParty ? "border-blue-200 bg-blue-50"
+          : bookingError ? "border-red-200 bg-red-50"
           : bookingComplete ? "border-emerald-200 bg-emerald-50"
           : "border-amber-200 bg-amber-50"
         }`}>
@@ -664,8 +712,12 @@ function LiveConversationPanel({
             <span className="text-2xl">{templateDetail.emoji}</span>
             <div className="flex-1 min-w-0">
               <p className="text-[14px] font-bold text-[#1a1206]">{templateDetail.label}</p>
-              {bookingError ? (
-                <p className="text-[11px] text-red-500 leading-snug truncate">Failed — {bookingError}</p>
+              {paymentApproval?.status === "pending" && iAmFundedParty ? (
+                <p className="text-[11px] text-amber-700 leading-snug">Your match&apos;s agent needs help — see below</p>
+              ) : paymentApproval?.status === "pending" && iAmShortParty ? (
+                <p className="text-[11px] text-blue-600 leading-snug">Waiting for {paymentApproval.fundedAgentName}&apos;s owner to respond…</p>
+              ) : bookingError ? (
+                <p className="text-[11px] text-red-500 leading-snug">{bookingError}</p>
               ) : bookingPending ? (
                 <p className="text-[11px] text-amber-700 leading-snug">Agent is booking the date…</p>
               ) : bookingComplete ? (
@@ -680,6 +732,56 @@ function LiveConversationPanel({
             </div>
           </div>
 
+          {/* Payment approval — funded party sees approve/decline */}
+          {paymentApproval?.status === "pending" && iAmFundedParty && (
+            <div className="flex flex-col gap-2.5 rounded-xl border border-amber-200 bg-white p-3">
+              <p className="text-[13px] font-semibold text-[#1a1206]">
+                {paymentApproval.shortAgentName}&apos;s wallet is short
+              </p>
+              <p className="text-[12px] text-[rgba(26,18,6,0.6)] leading-snug">
+                {paymentApproval.shortAgentName} only has <span className="font-semibold text-red-500">{paymentApproval.shortHas} cUSD</span> but needs <span className="font-semibold">{paymentApproval.shortNeeds} cUSD</span> for their share.
+                Would you like to cover the full <span className="font-semibold text-[#D6820A]">${paymentApproval.fullAmountUSD}</span> for this date?
+                You normally split the cost, but your match hasn&apos;t funded their agent yet.
+              </p>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => handleApprovalResponse(true)}
+                  disabled={approvalLoading}
+                  className="flex-1 rounded-xl bg-[#D6820A] py-2 text-[13px] font-bold text-white disabled:opacity-50 cursor-pointer hover:bg-[#b8700a] transition-colors"
+                >
+                  {approvalLoading ? "Processing…" : `Yes, I'll cover it ($${paymentApproval.fullAmountUSD})`}
+                </button>
+                <button
+                  onClick={() => handleApprovalResponse(false)}
+                  disabled={approvalLoading}
+                  className="flex-1 rounded-xl border border-red-200 bg-white py-2 text-[13px] font-semibold text-red-500 disabled:opacity-50 cursor-pointer hover:bg-red-50 transition-colors"
+                >
+                  No, cancel
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Payment approval — short party sees funding instructions */}
+          {paymentApproval?.status === "pending" && iAmShortParty && (
+            <div className="flex flex-col gap-2 rounded-xl border border-blue-200 bg-white p-3">
+              <p className="text-[13px] font-semibold text-[#1a1206]">Your agent wallet needs cUSD</p>
+              <p className="text-[12px] text-[rgba(26,18,6,0.6)] leading-snug">
+                Your agent only has <span className="font-semibold text-red-500">{paymentApproval.shortHas} cUSD</span> but needs <span className="font-semibold">{paymentApproval.shortNeeds} cUSD</span>.
+                Send cUSD on Celo to your agent wallet below to fund future dates. Your match {paymentApproval.fundedAgentName} has been asked if they&apos;ll cover this one.
+              </p>
+              <div className="flex items-center gap-2 rounded-lg bg-[#f5f0e8] px-3 py-2">
+                <span className="text-[11px] font-mono text-[rgba(26,18,6,0.6)] break-all flex-1">{paymentApproval.shortAgentWalletAddress}</span>
+                <button
+                  onClick={() => { navigator.clipboard.writeText(paymentApproval.shortAgentWalletAddress); toast.success("Address copied"); }}
+                  className="shrink-0 text-[11px] font-semibold text-[#D6820A] cursor-pointer hover:underline"
+                >
+                  Copy
+                </button>
+              </div>
+            </div>
+          )}
+
           {/* Spinner while booking */}
           {bookingPending && !bookingError && (
             <div className="flex items-center gap-2">
@@ -689,7 +791,7 @@ function LiveConversationPanel({
           )}
 
           {/* Retry on error */}
-          {bookingError && (
+          {bookingError && !paymentApproval && (
             <button
               onClick={handleRetry}
               disabled={retrying}

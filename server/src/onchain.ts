@@ -279,6 +279,101 @@ const erc20TransferAbi = parseAbi([
 ]);
 
 /**
+ * Structured error thrown when one or both payers don't have enough cUSD.
+ * Includes all the context needed to present the approval flow to users.
+ */
+export class PaymentShortfallError extends Error {
+  constructor(
+    message: string,
+    public readonly shortfalls: Array<{
+      agentName: string;
+      agentWalletAddress: string; // on-chain agent wallet — user sends cUSD here
+      userWallet: string;         // user's own wallet (for conversation lookup)
+      has: string;
+      needs: string;
+    }>,
+    public readonly funded: Array<{
+      agentName: string;
+      userWallet: string;
+      fullAmountUSD: string; // what they'd pay if they covered everything
+    }>,
+  ) {
+    super(message);
+    this.name = "PaymentShortfallError";
+  }
+}
+
+/**
+ * Checks balances for all payers without transferring anything.
+ * Returns shortfalls and who has enough.
+ */
+export async function checkPaymentBalances(params: {
+  payerMode: "AGENT_A" | "AGENT_B" | "SPLIT";
+  agentAPrivateKey: `0x${string}`;
+  agentBPrivateKey: `0x${string}`;
+  agentAName: string;
+  agentBName: string;
+  userWalletA: string;
+  userWalletB: string;
+  cUSDAddress: Address;
+  amountUSD: string;
+}): Promise<PaymentShortfallError | null> {
+  const { payerMode, agentAPrivateKey, agentBPrivateKey, agentAName, agentBName, userWalletA, userWalletB, cUSDAddress, amountUSD } = params;
+  const { formatUnits, parseUnits: pu } = await import("viem");
+  const { privateKeyToAddress } = await import("viem/accounts");
+
+  type Payer = { key: `0x${string}`; name: string; userWallet: string; amount: string };
+  let payers: Payer[] = [];
+  const half = (parseFloat(amountUSD) / 2).toFixed(6);
+
+  if (payerMode === "SPLIT") {
+    payers = [
+      { key: agentAPrivateKey, name: agentAName, userWallet: userWalletA, amount: half },
+      { key: agentBPrivateKey, name: agentBName, userWallet: userWalletB, amount: half },
+    ];
+  } else if (payerMode === "AGENT_A") {
+    payers = [{ key: agentAPrivateKey, name: agentAName, userWallet: userWalletA, amount: amountUSD }];
+  } else {
+    payers = [{ key: agentBPrivateKey, name: agentBName, userWallet: userWalletB, amount: amountUSD }];
+  }
+
+  const results = await Promise.all(payers.map(async (p) => {
+    const addr = privateKeyToAddress(p.key);
+    const balance = await publicClient.readContract({ address: cUSDAddress, abi: erc20TransferAbi, functionName: "balanceOf", args: [addr] });
+    const needed = pu(p.amount, 18);
+    return { payer: p, addr, balance, needed };
+  }));
+
+  const shortfalls = results
+    .filter(r => r.balance < r.needed)
+    .map(r => ({
+      agentName: r.payer.name,
+      agentWalletAddress: r.addr,
+      userWallet: r.payer.userWallet,
+      has: parseFloat(formatUnits(r.balance, 18)).toFixed(2),
+      needs: r.payer.amount,
+    }));
+
+  if (shortfalls.length === 0) return null;
+
+  // Who has enough and could cover the full cost?
+  const funded = results
+    .filter(r => r.balance >= pu(amountUSD, 18)) // can cover full amount
+    .map(r => ({
+      agentName: r.payer.name,
+      userWallet: r.payer.userWallet,
+      fullAmountUSD: amountUSD,
+    }));
+
+  const names = shortfalls.map(s => `${s.agentName} (has ${s.has} cUSD, needs ${s.needs})`).join(" and ");
+  return new PaymentShortfallError(
+    `Not enough cUSD to book this date: ${names}. Fund the agent wallet(s) on Celo to continue.`,
+    shortfalls,
+    funded,
+  );
+}
+
+/**
  * Transfers cUSD directly from an agent wallet to the Lemon treasury.
  * Checks balance upfront and throws a clear, user-readable error if insufficient.
  * SPLIT: both agents pay half in parallel.

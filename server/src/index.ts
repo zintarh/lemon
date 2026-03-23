@@ -27,6 +27,8 @@ import {
   mintNFT,
   resolveNextPayer,
   collectPayment,
+  checkPaymentBalances,
+  PaymentShortfallError,
   generateAgentWallet,
   setOperatorKey,
   fundAgentWallet,
@@ -275,6 +277,7 @@ app.get("/api/conversation/live", async (req: Request, res: Response) => {
       bookingError: (t.bookingError as string) ?? null,
       bookingPending: (t.bookingPending as boolean) ?? false,
       bookingComplete: (t.bookingComplete as boolean) ?? false,
+      paymentApproval: (t.paymentApproval as object) ?? null,
     });
   } catch (err) {
     res.status(500).json({ error: (err as Error).message });
@@ -378,7 +381,8 @@ async function performDateBooking(
   walletA: Address,
   walletB: Address,
   template: string,
-  sharedInterests: string[]
+  sharedInterests: string[],
+  opts: { convoId?: string; overridePayerMode?: "AGENT_A" | "AGENT_B" | "SPLIT" } = {}
 ): Promise<{ dateId: string; nftTokenId: string; metadataURI: string; imageUrl: string; tweetUrl: string | null }> {
   if (!VALID_DATE_TEMPLATES.has(template)) {
     throw new Error(`Invalid template "${template}". Expected one of: ${[...VALID_DATE_TEMPLATES].join(", ")}`);
@@ -395,7 +399,9 @@ async function performDateBooking(
 
   // 1. Resolve payer
   let payerMode: string;
-  if (agentA.billing_mode === 0 && agentB.billing_mode === 0) payerMode = "SPLIT";
+  if (opts.overridePayerMode) {
+    payerMode = opts.overridePayerMode;
+  } else if (agentA.billing_mode === 0 && agentB.billing_mode === 0) payerMode = "SPLIT";
   else if (agentA.billing_mode === 1 && agentB.billing_mode === 0) payerMode = "AGENT_A";
   else if (agentA.billing_mode === 0 && agentB.billing_mode === 1) payerMode = "AGENT_B";
   else {
@@ -403,7 +409,7 @@ async function performDateBooking(
     payerMode = onChainPayer.toLowerCase() === walletA.toLowerCase() ? "AGENT_A" : "AGENT_B";
   }
 
-  // 2. Collect cUSD payment (direct on-chain transfer from agent wallets → treasury)
+  // 2. Check balances upfront before attempting payment
   const agentAKey = agentA.agent_private_key as `0x${string}` | undefined;
   const agentBKey = agentB.agent_private_key as `0x${string}` | undefined;
   if (!agentAKey || !agentBKey) throw new Error("Agent private keys not found — cannot process payment");
@@ -414,6 +420,48 @@ async function performDateBooking(
 
   if (!treasuryAddress) throw new Error("LEMON_TREASURY_ADDRESS is not set");
 
+  const shortfall = await checkPaymentBalances({
+    payerMode: payerMode as "AGENT_A" | "AGENT_B" | "SPLIT",
+    agentAPrivateKey: agentAKey,
+    agentBPrivateKey: agentBKey,
+    agentAName: agentA.name,
+    agentBName: agentB.name,
+    userWalletA: walletA,
+    userWalletB: walletB,
+    cUSDAddress: CUSD_ADDRESS,
+    amountUSD: DATE_COST_USD_STR,
+  });
+
+  if (shortfall) {
+    // If one side has enough and can cover the full cost, create an approval request
+    if (shortfall.funded.length > 0 && opts.convoId) {
+      const funded = shortfall.funded[0];
+      const short = shortfall.shortfalls[0];
+      const approval = {
+        fundedWallet: funded.userWallet,
+        fundedAgentName: funded.agentName,
+        shortWallet: short.userWallet,
+        shortAgentName: short.agentName,
+        shortAgentWalletAddress: short.agentWalletAddress,
+        shortHas: short.has,
+        shortNeeds: short.needs,
+        fullAmountUSD: funded.fullAmountUSD,
+        template,
+        sharedInterests,
+        status: "pending",
+        expiresAt: Date.now() + 24 * 60 * 60 * 1000, // 24h window
+      };
+      const { data: convoRow } = await supabase.from("conversations").select("transcript").eq("id", opts.convoId).single();
+      const existing = (convoRow?.transcript as Record<string, unknown>) ?? {};
+      await supabase.from("conversations").update({
+        transcript: { ...existing, bookingPending: false, bookingError: null, paymentApproval: approval },
+      }).eq("id", opts.convoId);
+      console.log(`[payment] ⏳ Payment approval pending — ${funded.agentName} asked to cover full cost for ${short.agentName}`);
+    }
+    throw shortfall;
+  }
+
+  // 3. Collect payment
   await collectPayment({
     payerMode: payerMode as "AGENT_A" | "AGENT_B" | "SPLIT",
     agentAPrivateKey: agentAKey,
@@ -564,20 +612,21 @@ app.post("/api/date/retry", async (req: Request, res: Response) => {
     }
     const bookA = convo.wallet_a as Address;
     const bookB = convo.wallet_b as Address;
-    // Clear any previous booking error from transcript
+    // Clear any previous booking error/approval from transcript
     const transcript = (convo.transcript as Record<string, unknown>) ?? {};
     await supabase.from("conversations").update({
-      transcript: { ...transcript, bookingError: null, bookingPending: true },
+      transcript: { ...transcript, bookingError: null, bookingPending: true, paymentApproval: null },
     }).eq("id", convo.id);
 
     // Run booking in background — don't block the HTTP response (canonical pair order from DB)
-    performDateBooking(bookA, bookB, convo.template_suggested, convo.shared_interests ?? [])
+    performDateBooking(bookA, bookB, convo.template_suggested, convo.shared_interests ?? [], { convoId: convo.id })
       .then(async () => {
         await supabase.from("conversations").update({
           transcript: { ...transcript, bookingError: null, bookingPending: false, bookingComplete: true },
         }).eq("id", convo.id);
       })
       .catch(async (err) => {
+        if (err instanceof PaymentShortfallError) return; // approval data already saved
         const msg = (err as Error).message;
         console.error("[server] Retry booking failed:", msg);
         await supabase.from("conversations").update({
@@ -586,6 +635,96 @@ app.post("/api/date/retry", async (req: Request, res: Response) => {
       });
 
     res.json({ ok: true, message: "Booking retry started" });
+  } catch (err) {
+    res.status(500).json({ error: (err as Error).message });
+  }
+});
+
+// ─── POST /api/payment-approval/respond ──────────────────────────────────────
+// Called when the funded agent's user approves or declines covering the full date cost.
+
+app.post("/api/payment-approval/respond", async (req: Request, res: Response) => {
+  try {
+    const { wallet, approve } = req.body as { wallet: string; approve: boolean };
+    if (!wallet || !isAddress(wallet as Address)) {
+      res.status(400).json({ error: "wallet must be a valid 0x address" });
+      return;
+    }
+
+    // Find the conversation where this wallet is the funded party with a pending approval
+    const w = wallet.toLowerCase();
+    const { data: rows } = await supabase
+      .from("conversations")
+      .select("*")
+      .or(`wallet_a.eq.${w},wallet_b.eq.${w}`)
+      .eq("passed", true)
+      .order("created_at", { ascending: false })
+      .limit(10);
+
+    const convoRow = (rows ?? []).find((r) => {
+      const t = (r.transcript as Record<string, unknown>) ?? {};
+      const pa = t.paymentApproval as Record<string, unknown> | null;
+      return pa && pa.status === "pending" && (pa.fundedWallet as string)?.toLowerCase() === w;
+    });
+
+    if (!convoRow) {
+      res.status(404).json({ error: "No pending payment approval found for this wallet" });
+      return;
+    }
+
+    const t = (convoRow.transcript as Record<string, unknown>) ?? {};
+    const pa = t.paymentApproval as Record<string, unknown>;
+
+    if (!approve) {
+      // Declined — cancel the date with clear messages for both users
+      const shortName = pa.shortAgentName as string;
+      const fundedName = pa.fundedAgentName as string;
+      await supabase.from("conversations").update({
+        transcript: {
+          ...t,
+          paymentApproval: { ...pa, status: "declined" },
+          bookingError: `${fundedName} declined to cover the full date cost. ${shortName}'s agent wallet needs more cUSD — fund it to book future dates.`,
+        },
+      }).eq("id", convoRow.id);
+      res.json({ ok: true, message: "Date cancelled" });
+      return;
+    }
+
+    // Approved — funded wallet pays the full amount
+    // Figure out which payerMode to use (which of A/B is the funded wallet)
+    const isWalletA = convoRow.wallet_a.toLowerCase() === w;
+    const overridePayerMode = isWalletA ? "AGENT_A" : "AGENT_B";
+
+    await supabase.from("conversations").update({
+      transcript: {
+        ...t,
+        paymentApproval: { ...pa, status: "approved" },
+        bookingPending: true,
+        bookingError: null,
+      },
+    }).eq("id", convoRow.id);
+
+    res.json({ ok: true, message: "Booking in progress — you're covering the full cost" });
+
+    // Run booking in background with the funded wallet paying full
+    performDateBooking(
+      convoRow.wallet_a as Address,
+      convoRow.wallet_b as Address,
+      pa.template as string,
+      (pa.sharedInterests as string[]) ?? [],
+      { convoId: convoRow.id, overridePayerMode }
+    ).then(async () => {
+      const freshT = (convoRow.transcript as Record<string, unknown>) ?? {};
+      await supabase.from("conversations").update({
+        transcript: { ...freshT, bookingPending: false, bookingComplete: true, bookingError: null, paymentApproval: { ...pa, status: "approved" } },
+      }).eq("id", convoRow.id);
+    }).catch(async (err) => {
+      const msg = (err as Error).message;
+      const freshT = (convoRow.transcript as Record<string, unknown>) ?? {};
+      await supabase.from("conversations").update({
+        transcript: { ...freshT, bookingPending: false, bookingError: msg, paymentApproval: { ...pa, status: "approved" } },
+      }).eq("id", convoRow.id);
+    });
   } catch (err) {
     res.status(500).json({ error: (err as Error).message });
   }
@@ -1022,7 +1161,7 @@ async function runMatchingCycle() {
           if (convoRow) {
             const existing = (convoRow.transcript as Record<string, unknown>) ?? {};
             await supabase.from("conversations").update({
-              transcript: { ...existing, bookingPending: true, bookingError: null, bookingComplete: false },
+              transcript: { ...existing, bookingPending: true, bookingError: null, bookingComplete: false, paymentApproval: null },
             }).eq("id", convoRow.id);
           }
 
@@ -1030,7 +1169,8 @@ async function runMatchingCycle() {
             top.agentA as Address,
             top.agentB as Address,
             template,
-            top.sharedInterests ?? []
+            top.sharedInterests ?? [],
+            { convoId: convoRow?.id }
           ).then(async () => {
             console.log(`[matcher] ✓ Auto-booking complete for ${top.agentA.slice(0, 8)}↔${top.agentB.slice(0, 8)}`);
             const row = await dbGetLiveConversation(top.agentA);
@@ -1041,6 +1181,8 @@ async function runMatchingCycle() {
               }).eq("id", row.id);
             }
           }).catch(async (bookErr) => {
+            // PaymentShortfallError — approval data already saved in transcript, don't overwrite with error
+            if (bookErr instanceof PaymentShortfallError) return;
             const msg = (bookErr as Error).message;
             console.error("[matcher] Auto-booking failed (user can retry):", msg);
             const row = await dbGetLiveConversation(top.agentA);
