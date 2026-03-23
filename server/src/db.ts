@@ -437,16 +437,27 @@ export async function dbHasLiveConversationBetween(walletA: string, walletB: str
     .or(filter);
   if ((inProgress ?? 0) > 0) return true;
 
-  // Pending approval (passed=true, template set, within 15 min)
+  // Pending follow-up (passed=true, template set, within 15 min) — but once booking
+  // is marked complete we should not block rematching or keep showing "live" UI.
   const fifteenMinutesAgo = new Date(Date.now() - 15 * 60 * 1000).toISOString();
-  const { count: pendingApproval } = await supabase
+  const { data: pendingRows } = await supabase
     .from("conversations")
-    .select("*", { count: "exact", head: true })
+    .select("transcript")
     .eq("passed", true)
     .not("template_suggested", "is", null)
     .gte("created_at", fifteenMinutesAgo)
     .or(filter);
-  return (pendingApproval ?? 0) > 0;
+  const hasPending = (pendingRows ?? []).some((r) => {
+    const t = (r.transcript as Record<string, unknown>) ?? {};
+    const bookingComplete = t.bookingComplete === true;
+    const paymentApproval = (t.paymentApproval as Record<string, unknown> | undefined) ?? undefined;
+    const approvalPending = paymentApproval?.status === "pending";
+    const bookingPending = t.bookingPending === true;
+    // Treat as live only while waiting for approval or booking completion.
+    // Once completed, the pair should immediately re-enter the pool.
+    return !bookingComplete && (approvalPending || bookingPending || !("bookingComplete" in t));
+  });
+  return hasPending;
 }
 
 /**
@@ -482,7 +493,11 @@ export async function dbGetLiveConversation(wallet: string): Promise<Conversatio
     .order("created_at", { ascending: false })
     .limit(1)
     .single();
-  return recent ?? null;
+  if (!recent) return null;
+  const t = (recent.transcript as Record<string, unknown>) ?? {};
+  // Completed booking should no longer be treated as a live conversation.
+  if (t.bookingComplete === true) return null;
+  return recent;
 }
 
 // ─── Match store ──────────────────────────────────────────────────────────────

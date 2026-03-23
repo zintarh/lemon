@@ -726,9 +726,10 @@ app.post("/api/date/retry", async (req: Request, res: Response) => {
 
     // Run booking in background — don't block the HTTP response (canonical pair order from DB)
     performDateBooking(bookA, bookB, convo.template_suggested, convo.shared_interests ?? [], { convoId: convo.id })
-      .then(async () => {
+      .then(async (result) => {
         await supabase.from("conversations").update({
-          transcript: { ...transcript, bookingError: null, bookingPending: false, bookingComplete: true },
+          transcript: { ...transcript, bookingError: null, bookingPending: false, bookingComplete: true,
+            dateImageUrl: result.imageUrl ?? null, dateTweetUrl: result.tweetUrl ?? null },
         }).eq("id", convo.id);
       })
       .catch(async (err) => {
@@ -819,10 +820,12 @@ app.post("/api/payment-approval/respond", async (req: Request, res: Response) =>
       pa.template as string,
       (pa.sharedInterests as string[]) ?? [],
       { convoId: convoRow.id, overridePayerMode }
-    ).then(async () => {
+    ).then(async (result) => {
       const freshT = (convoRow.transcript as Record<string, unknown>) ?? {};
       await supabase.from("conversations").update({
-        transcript: { ...freshT, bookingPending: false, bookingComplete: true, bookingError: null, paymentApproval: { ...pa, status: "approved" } },
+        transcript: { ...freshT, bookingPending: false, bookingComplete: true, bookingError: null,
+          paymentApproval: { ...pa, status: "approved" },
+          dateImageUrl: result.imageUrl ?? null, dateTweetUrl: result.tweetUrl ?? null },
       }).eq("id", convoRow.id);
     }).catch(async (err) => {
       const msg = (err as Error).message;
@@ -1402,13 +1405,14 @@ async function runMatchingCycle() {
             template,
             top.sharedInterests ?? [],
             { convoId: convoRow?.id }
-          ).then(async () => {
+          ).then(async (result) => {
             console.log(`[matcher] ✓ Auto-booking complete for ${top.agentA.slice(0, 8)}↔${top.agentB.slice(0, 8)}`);
             const row = await dbGetLiveConversation(top.agentA);
             if (row) {
               const t = (row.transcript as Record<string, unknown>) ?? {};
               await supabase.from("conversations").update({
-                transcript: { ...t, bookingPending: false, bookingComplete: true, bookingError: null },
+                transcript: { ...t, bookingPending: false, bookingComplete: true, bookingError: null,
+                  dateImageUrl: result.imageUrl ?? null, dateTweetUrl: result.tweetUrl ?? null },
               }).eq("id", row.id);
             }
           }).catch(async (bookErr) => {

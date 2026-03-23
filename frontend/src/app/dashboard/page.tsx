@@ -398,6 +398,8 @@ type LiveConvoData = {
   bookingPending?: boolean;
   bookingComplete?: boolean;
   paymentApproval?: PaymentApproval | null;
+  dateImageUrl?: string | null;
+  dateTweetUrl?: string | null;
   isStale?: boolean;
   lastMessageAt?: number | null;
 };
@@ -511,6 +513,8 @@ function LiveConversationPanel({
   const bookingComplete = convo.bookingComplete ?? false;
   const bookingError = convo.bookingError ?? null;
   const paymentApproval = convo.paymentApproval ?? null;
+  const dateImageUrl = convo.dateImageUrl ?? null;
+  const dateTweetUrl = convo.dateTweetUrl ?? null;
 
   const [retrying, setRetrying] = useState(false);
   const [dismissed, setDismissed] = useState(false);
@@ -800,6 +804,25 @@ function LiveConversationPanel({
             >
               {retrying ? "Retrying…" : "Retry booking"}
             </button>
+          )}
+
+          {/* Date memory image + tweet link after success */}
+          {bookingComplete && dateImageUrl && (
+            <div className="rounded-xl overflow-hidden border border-amber-200">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img src={dateImageUrl} alt="Date memory" className="w-full object-cover max-h-48" />
+              {dateTweetUrl && (
+                <a
+                  href={dateTweetUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex items-center justify-center gap-1.5 py-2 bg-black text-white text-[12px] font-semibold hover:bg-[#111] transition-colors"
+                >
+                  <svg className="w-3.5 h-3.5 fill-white" viewBox="0 0 24 24"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-4.714-6.231-5.401 6.231H2.744l7.737-8.858L1.254 2.25H8.08l4.259 5.63 5.905-5.63zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg>
+                  View on X
+                </a>
+              )}
+            </div>
           )}
 
           {/* Rematch after success */}
