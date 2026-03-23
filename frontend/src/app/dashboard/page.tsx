@@ -63,6 +63,7 @@ type ServerDateMeta = {
   status?: number;
   nft_token_id?: string | null;
   tweet_url?: string | null;
+  needs_user_mint?: boolean | null;
   failure_reason?: string | null;
   refund_status?: string | null;
   refund_note?: string | null;
@@ -223,6 +224,10 @@ function DateCard({
         : meta?.refund_status === "not_charged"
         ? "Cancelled • Not charged"
         : "Cancelled"
+      : record.status === 1
+      ? meta?.needs_user_mint
+        ? "Awaiting user mint"
+        : "Active"
       : s.label;
 
   return (
@@ -282,6 +287,9 @@ function ActiveDatePanel({ dateId, myAddress }: { dateId: bigint; myAddress: Add
       : undefined;
   const { data: partnerProfile } = useAgentProfile(partnerAddr);
   const SERVER_URL = process.env.NEXT_PUBLIC_SERVER_URL ?? "http://localhost:4000";
+  const [minting, setMinting] = useState(false);
+  const [mintResult, setMintResult] = useState<string | null>(null);
+  const [serverMeta, setServerMeta] = useState<ServerDateMeta | null>(null);
   const [poolChoice, setPoolChoice] = useState<"pending" | "yes" | "no">("pending");
   const [poolLoading, setPoolLoading] = useState(false);
 
@@ -299,6 +307,42 @@ function ActiveDatePanel({ dateId, myAddress }: { dateId: bigint; myAddress: Add
       setPoolChoice(active ? "yes" : "no");
     } finally {
       setPoolLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`${SERVER_URL}/api/date/${dateId.toString()}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (!cancelled) setServerMeta(d);
+      })
+      .catch(() => {
+        if (!cancelled) setServerMeta(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [SERVER_URL, dateId, mintResult]);
+
+  async function handleMintMemory() {
+    setMinting(true);
+    try {
+      const r = await fetch(`${SERVER_URL}/api/date/${dateId.toString()}/mint-memory`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ wallet: myAddress }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error((d as { error?: string }).error ?? "Failed to mint memory");
+      setMintResult("Memory minted! Finalized and moved to Date Attempts.");
+      toast.success("Memory minted");
+    } catch (e) {
+      const msg = (e as Error).message;
+      setMintResult(msg);
+      toast.error("Mint failed", { description: msg });
+    } finally {
+      setMinting(false);
     }
   }
 
@@ -393,14 +437,30 @@ function ActiveDatePanel({ dateId, myAddress }: { dateId: bigint; myAddress: Add
   // If timer is over but chain status is still ACTIVE, this attempt likely failed to
   // finalize. Don't keep showing the "live date" interface forever.
   if (isDone && record.status === 1) {
+    const awaitingMint = serverMeta?.needs_user_mint !== false;
     return (
       <div className="flex h-full flex-col items-center justify-center gap-4 px-6 text-center">
-        <span className="text-[32px]">⚠️</span>
-        <p className="text-[20px] font-black tracking-[-0.02em] text-[#1a1206]">This date attempt is still marked active</p>
-        <p className="max-w-[360px] text-[13px] leading-[1.6] text-[rgba(26,18,6,0.5)]">
-          The timer ended, but this attempt did not fully finalize yet. Check Date Attempts on the right for
-          refund/cancellation details. Your agent can still re-enter the pool from the completion card once finalized.
+        <span className="text-[32px]">{awaitingMint ? "🧠" : "⚠️"}</span>
+        <p className="text-[20px] font-black tracking-[-0.02em] text-[#1a1206]">
+          {awaitingMint ? "Date finished — mint memory to finalize" : "This date attempt is still marked active"}
         </p>
+        <p className="max-w-[360px] text-[13px] leading-[1.6] text-[rgba(26,18,6,0.5)]">
+          {awaitingMint
+            ? "User-triggered flow: minting the memory completes the date, posts to X, and pauses the agents until re-entry."
+            : "The timer ended, but this attempt did not fully finalize yet. Check Date Attempts for failure/refund details."}
+        </p>
+        {awaitingMint && (
+          <button
+            onClick={handleMintMemory}
+            disabled={minting}
+            className="rounded-xl border-none bg-[#D6820A] px-4 py-2.5 text-[13px] font-bold text-white disabled:opacity-50 cursor-pointer hover:bg-[#b8690a] transition-colors"
+          >
+            {minting ? "Minting…" : "Mint memory NFT"}
+          </button>
+        )}
+        {mintResult && (
+          <p className="max-w-[360px] text-[12px] text-[rgba(26,18,6,0.55)]">{mintResult}</p>
+        )}
       </div>
     );
   }

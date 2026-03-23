@@ -47,6 +47,7 @@ export type DateRow = {
   metadata_uri: string | null;
   image_url: string | null;
   tweet_url: string | null;
+  needs_user_mint?: boolean | null;
   failure_reason?: string | null;
   refund_status?: string | null; // refunded | failed | not_charged | not_needed
   refund_note?: string | null;
@@ -164,7 +165,7 @@ export async function dbUpdateDate(dateId: string, patch: Partial<DateRow>): Pro
   // Backward compatibility: older DBs may not yet have failure/refund columns.
   if (error && /column .* does not exist/i.test(error.message)) {
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    const { failure_reason, refund_status, refund_note, ...fallback } = patch;
+    const { failure_reason, refund_status, refund_note, needs_user_mint, ...fallback } = patch;
     ({ error } = await supabase
       .from("dates")
       .update(fallback)

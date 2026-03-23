@@ -313,6 +313,7 @@ app.get("/api/conversation/live", async (req: Request, res: Response) => {
       bookingError: (t.bookingError as string) ?? null,
       bookingPending: (t.bookingPending as boolean) ?? false,
       bookingComplete: (t.bookingComplete as boolean) ?? false,
+      bookingReadyToMint: (t.bookingReadyToMint as boolean) ?? false,
       paymentApproval: (t.paymentApproval as object) ?? null,
     });
   } catch (err) {
@@ -419,7 +420,7 @@ async function performDateBooking(
   template: string,
   sharedInterests: string[],
   opts: { convoId?: string; overridePayerMode?: "AGENT_A" | "AGENT_B" | "SPLIT" } = {}
-): Promise<{ dateId: string; nftTokenId: string; metadataURI: string; imageUrl: string; tweetUrl: string | null }> {
+): Promise<{ dateId: string; metadataURI: string; imageUrl: string; requiresUserMint: true }> {
   if (!VALID_DATE_TEMPLATES.has(template)) {
     throw new Error(`Invalid template "${template}". Expected one of: ${[...VALID_DATE_TEMPLATES].join(", ")}`);
   }
@@ -554,7 +555,7 @@ async function performDateBooking(
     cost_usd: "0", payment_token: CUSD_ADDRESS, x402_tx_hash: "", nft_token_id: null,
     scheduled_at: scheduledAt, completed_at: null, metadata_uri: plan.metadataURI,
     image_url: plan.imageUrl, tweet_url: null,
-    failure_reason: null, refund_status: null, refund_note: null,
+    needs_user_mint: true, failure_reason: null, refund_status: null, refund_note: null,
     indexed_at: new Date().toISOString(),
   });
   console.log(`[server] date #${dateId} written to DB (status: ACTIVE)`);
@@ -669,81 +670,9 @@ async function performDateBooking(
     throw payErr;
   }
 
-  // 5. Mint NFT
-  let nftTokenId: bigint;
-  try {
-    nftTokenId = await mintNFT({
-      agentA: walletA, agentB: walletB, dateId,
-      metadataURI: plan.metadataURI, agentPrivateKey: signerKey,
-    });
-  } catch (mintErr) {
-    // Payment was already collected — cancel on-chain and refund cUSD to agent wallets
-    console.error("[server] mintNFT failed after payment — cancelling date and issuing refund", dateId.toString(), mintErr);
-    await dbUpdateDate(dateId.toString(), {
-      status: 3,
-      failure_reason: (mintErr as Error).message,
-      refund_status: "pending",
-      refund_note: "Attempting refund after mint failure.",
-    });
-    await cancelDate(dateId).catch(() => {});
-    try {
-      await refundPayment({
-        payerMode: payerMode as "AGENT_A" | "AGENT_B" | "SPLIT",
-        agentAPrivateKey: agentAKey,
-        agentBPrivateKey: agentBKey,
-        agentAName: agentA.name,
-        agentBName: agentB.name,
-        treasuryAddress,
-        cUSDAddress: CUSD_ADDRESS,
-        amountUSD,
-      });
-      await dbUpdateDate(dateId.toString(), {
-        refund_status: "refunded",
-        refund_note: "Refund completed after mint failure.",
-      });
-    } catch (refundErr) {
-      console.error("[server] Refund also failed:", refundErr);
-      await dbUpdateDate(dateId.toString(), {
-        refund_status: "failed",
-        refund_note: `Automatic refund failed: ${(refundErr as Error).message}`,
-      });
-    }
-    await pauseBothAgents("mint_failure");
-    throw mintErr;
-  }
-
-  // 6. Complete on-chain + DB — only after NFT is minted
-  await completeDate(dateId, nftTokenId);
-  const completedAt = Math.floor(Date.now() / 1000);
-  await dbUpdateDate(dateId.toString(), {
-    status: 2, nft_token_id: nftTokenId.toString(), completed_at: completedAt,
-  });
-  console.log(`[server] date #${dateId} COMPLETED (nft: ${nftTokenId})`);
-
-  // Require explicit human opt-in before any next date lifecycle.
-  await pauseBothAgents("date_completed");
-
-  // 7. Tweet after completion (non-fatal)
-  let tweetUrl: string | null = null;
-  try {
-    const tweet = await postDateTweet({ ipfsImageCID: plan.ipfsImageCID, caption: plan.tweetCaption });
-    tweetUrl = tweet.tweetUrl;
-    await dbUpdateDate(dateId.toString(), { tweet_url: tweetUrl });
-    console.log(`[server] tweet posted: ${tweetUrl}`);
-  } catch (tweetErr) {
-    console.warn("[server] Tweet failed (non-fatal):", (tweetErr as Error).message);
-  }
-
-  // 8. Telegram notifications (non-fatal)
-  const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? process.env.SERVER_URL ?? "https://lemon.dating";
-  sendRematchSuggestion(walletA.toLowerCase(), walletB.toLowerCase(), agentA.name, agentB.name, template, appUrl)
-    .catch(() => {});
-  dbCountCompletedDatesBetween(walletA.toLowerCase(), walletB.toLowerCase())
-    .then(async (count) => {
-      if (count === 3) await sendIntroMessage(walletA.toLowerCase(), walletB.toLowerCase(), agentA.name, agentB.name).catch(() => {});
-    }).catch(() => {});
-
-  return { dateId: dateId.toString(), nftTokenId: nftTokenId.toString(), metadataURI: plan.metadataURI, imageUrl: plan.imageUrl, tweetUrl };
+  // 5. Wait for user-triggered mint from dashboard.
+  console.log(`[server] date #${dateId} booked and funded — awaiting user mint`);
+  return { dateId: dateId.toString(), metadataURI: plan.metadataURI, imageUrl: plan.imageUrl, requiresUserMint: true };
 }
 
 // ─── POST /api/date/book ─────────────────────────────────────────────────────
@@ -810,8 +739,8 @@ app.post("/api/date/retry", async (req: Request, res: Response) => {
     performDateBooking(bookA, bookB, convo.template_suggested, convo.shared_interests ?? [], { convoId: convo.id })
       .then(async (result) => {
         await supabase.from("conversations").update({
-          transcript: { ...transcript, bookingError: null, bookingPending: false, bookingComplete: true,
-            dateImageUrl: result.imageUrl ?? null, dateTweetUrl: result.tweetUrl ?? null },
+        transcript: { ...transcript, bookingError: null, bookingPending: false, bookingComplete: false, bookingReadyToMint: true,
+            dateImageUrl: result.imageUrl ?? null, dateTweetUrl: null },
         }).eq("id", convo.id);
       })
       .catch(async (err) => {
@@ -905,9 +834,9 @@ app.post("/api/payment-approval/respond", async (req: Request, res: Response) =>
     ).then(async (result) => {
       const freshT = (convoRow.transcript as Record<string, unknown>) ?? {};
       await supabase.from("conversations").update({
-        transcript: { ...freshT, bookingPending: false, bookingComplete: true, bookingError: null,
+        transcript: { ...freshT, bookingPending: false, bookingComplete: false, bookingReadyToMint: true, bookingError: null,
           paymentApproval: { ...pa, status: "approved" },
-          dateImageUrl: result.imageUrl ?? null, dateTweetUrl: result.tweetUrl ?? null },
+          dateImageUrl: result.imageUrl ?? null, dateTweetUrl: null },
       }).eq("id", convoRow.id);
     }).catch(async (err) => {
       const msg = (err as Error).message;
@@ -970,6 +899,101 @@ app.post("/api/date/rematch", async (req: Request, res: Response) => {
 });
 
 // ─── GET /api/date/:dateId ────────────────────────────────────────────────────
+
+// ─── POST /api/date/:dateId/mint-memory ──────────────────────────────────────
+// User-triggered mint flow: finalize active booked date -> mint NFT -> complete -> tweet.
+app.post("/api/date/:dateId/mint-memory", async (req: Request, res: Response) => {
+  try {
+    const id = req.params.dateId;
+    const date = await dbGetDate(id);
+    if (!date) return void res.status(404).json({ error: "Date not found" });
+
+    const wallet = String((req.body as { wallet?: string })?.wallet ?? "").toLowerCase();
+    if (!wallet || !isAddress(wallet as Address)) {
+      return void res.status(400).json({ error: "wallet must be a valid 0x address" });
+    }
+    if (wallet !== date.agent_a.toLowerCase() && wallet !== date.agent_b.toLowerCase()) {
+      return void res.status(403).json({ error: "Only participants can mint this memory" });
+    }
+    if (date.status === 2 && date.nft_token_id) {
+      return void res.json({ ok: true, alreadyMinted: true, nftTokenId: date.nft_token_id, tweetUrl: date.tweet_url ?? null });
+    }
+    if (date.status !== 1) {
+      return void res.status(400).json({ error: `Date is not active (status=${date.status})` });
+    }
+
+    const [agentA, agentB] = await Promise.all([
+      dbGetAgent(date.agent_a),
+      dbGetAgent(date.agent_b),
+    ]);
+    if (!agentA || !agentB || !agentA.agent_private_key) {
+      return void res.status(500).json({ error: "Agent records are incomplete for minting" });
+    }
+
+    const dateId = BigInt(id);
+    const nftTokenId = await mintNFT({
+      agentA: date.agent_a as Address,
+      agentB: date.agent_b as Address,
+      dateId,
+      metadataURI: date.metadata_uri ?? "ipfs://placeholder",
+      agentPrivateKey: agentA.agent_private_key as `0x${string}`,
+    });
+    await completeDate(dateId, nftTokenId);
+
+    const completedAt = Math.floor(Date.now() / 1000);
+    await dbUpdateDate(id, {
+      status: 2,
+      nft_token_id: nftTokenId.toString(),
+      completed_at: completedAt,
+      needs_user_mint: false,
+      failure_reason: null,
+      refund_status: null,
+      refund_note: null,
+    });
+
+    // Require explicit opt-in for next lifecycle.
+    await supabase
+      .from("agents")
+      .update({ active: false })
+      .in("wallet", [date.agent_a.toLowerCase(), date.agent_b.toLowerCase()]);
+
+    // Mark conversation card as done.
+    const { data: convoRows } = await supabase
+      .from("conversations")
+      .select("id, transcript")
+      .or(`and(wallet_a.eq.${date.agent_a.toLowerCase()},wallet_b.eq.${date.agent_b.toLowerCase()}),and(wallet_a.eq.${date.agent_b.toLowerCase()},wallet_b.eq.${date.agent_a.toLowerCase()})`)
+      .eq("passed", true)
+      .order("created_at", { ascending: false })
+      .limit(3);
+    for (const row of convoRows ?? []) {
+      const t = (row.transcript as Record<string, unknown>) ?? {};
+      await supabase.from("conversations").update({
+        transcript: { ...t, bookingPending: false, bookingReadyToMint: false, bookingComplete: true, bookingError: null },
+      }).eq("id", row.id);
+    }
+
+    // Post to X after successful user-triggered mint (non-fatal).
+    let tweetUrl: string | null = null;
+    try {
+      const templateLabel = TEMPLATE_LABEL_BY_NUM[Number(date.template ?? 0)] ?? "Date";
+      const caption = `Memory minted on Lemon: ${agentA.name} x ${agentB.name} · ${templateLabel} 🍋 #lemondating`;
+      if (date.image_url) {
+        const tweet = await postDateTweetFromImageUrl({ imageUrl: date.image_url, caption });
+        tweetUrl = tweet.tweetUrl;
+        await dbUpdateDate(id, { tweet_url: tweetUrl });
+      }
+    } catch (e) {
+      console.warn("[mint-memory] tweet failed (non-fatal):", (e as Error).message);
+    }
+
+    res.json({ ok: true, nftTokenId: nftTokenId.toString(), tweetUrl });
+  } catch (err) {
+    // If mint flow fails after a payment-booked active date, keep status visible in history.
+    const msg = (err as Error).message;
+    console.error("[mint-memory] failed:", msg);
+    res.status(500).json({ error: msg });
+  }
+});
 
 app.get("/api/date/:dateId", async (req: Request, res: Response) => {
   try {
@@ -1384,17 +1408,31 @@ setInterval(cleanupZombieConversations, 5 * 60 * 1000);
 async function cleanupStaleActiveDates() {
   try {
     const cutoffSec = Math.floor(Date.now() / 1000) - 15 * 60; // 15 minutes old
-    const { data: staleRows, error } = await supabase
+    let staleRows: Array<{ date_id: string; agent_a: string; agent_b: string; needs_user_mint?: boolean }> | null = null;
+    let error: { message: string } | null = null;
+    ({ data: staleRows, error } = await supabase
       .from("dates")
-      .select("date_id, agent_a, agent_b")
+      .select("date_id, agent_a, agent_b, needs_user_mint")
       .eq("status", 1)
       .lt("scheduled_at", cutoffSec)
       .order("scheduled_at", { ascending: true })
-      .limit(50);
+      .limit(50));
+    if (error && /column .* does not exist/i.test(error.message)) {
+      // Backward compatibility before schema migration.
+      ({ data: staleRows, error } = await supabase
+        .from("dates")
+        .select("date_id, agent_a, agent_b")
+        .eq("status", 1)
+        .lt("scheduled_at", cutoffSec)
+        .order("scheduled_at", { ascending: true })
+        .limit(50));
+      staleRows = (staleRows ?? []).map((r) => ({ ...r, needs_user_mint: false }));
+    }
     if (error) throw new Error(error.message);
     if (!staleRows || staleRows.length === 0) return;
 
     for (const row of staleRows) {
+      if (row.needs_user_mint) continue; // waiting for explicit user action, not stale.
       const id = BigInt(row.date_id);
       try {
         await cancelDate(id);
@@ -1566,13 +1604,13 @@ async function runMatchingCycle() {
             top.sharedInterests ?? [],
             { convoId: convoRow?.id }
           ).then(async (result) => {
-            console.log(`[matcher] ✓ Auto-booking complete for ${top.agentA.slice(0, 8)}↔${top.agentB.slice(0, 8)}`);
+            console.log(`[matcher] ✓ Auto-booking complete for ${top.agentA.slice(0, 8)}↔${top.agentB.slice(0, 8)} (awaiting user mint)`);
             const row = await dbGetLiveConversation(top.agentA);
             if (row) {
               const t = (row.transcript as Record<string, unknown>) ?? {};
               await supabase.from("conversations").update({
-                transcript: { ...t, bookingPending: false, bookingComplete: true, bookingError: null,
-                  dateImageUrl: result.imageUrl ?? null, dateTweetUrl: result.tweetUrl ?? null },
+                transcript: { ...t, bookingPending: false, bookingComplete: false, bookingReadyToMint: true, bookingError: null,
+                  dateImageUrl: result.imageUrl ?? null, dateTweetUrl: null },
               }).eq("id", row.id);
             }
           }).catch(async (bookErr) => {

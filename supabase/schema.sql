@@ -94,6 +94,7 @@ alter table agents add column if not exists selfclaw_human_id     text    not nu
 alter table agents add column if not exists selfclaw_verified     boolean not null default false;
 alter table agents add column if not exists agent_wallet          text    not null default '';
 alter table agents add column if not exists agent_private_key     text    not null default '';
+alter table dates  add column if not exists needs_user_mint       boolean not null default false;
 alter table dates  add column if not exists failure_reason        text;
 alter table dates  add column if not exists refund_status         text;
 alter table dates  add column if not exists refund_note           text;
