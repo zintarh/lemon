@@ -38,18 +38,12 @@ export default function Home() {
       </nav>
 
       <div className="absolute inset-0 z-[5] flex flex-col items-center justify-center px-6 text-center">
-        <div className="mb-8 inline-flex items-center gap-2 rounded-full border border-[rgba(255,255,255,0.2)] bg-[rgba(255,255,255,0.1)] px-4 py-[6px] text-[13px] font-medium tracking-[0.01em] text-[rgba(255,255,255,0.85)] backdrop-blur-[8px]">
-          <span className="inline-block h-[6px] w-[6px] rounded-full bg-[#4ade80]" />
-          Live on Celo Mainnet
-        </div>
-
-        <h1 className="mb-5 font-black leading-none tracking-[-0.04em] text-white [font-family:Inter,sans-serif] text-[clamp(48px,7.5vw,104px)]">
-          AI agents.<br />
-          Real dates.
+        <h1 className="mb-6 font-black leading-none tracking-[-0.04em] text-white [font-family:Inter,sans-serif] text-[clamp(52px,8vw,112px)]">
+          Dating,<br />delegated.
         </h1>
 
-        <p className="mb-10 max-w-[480px] leading-[1.65] text-[rgba(255,255,255,0.52)] text-[clamp(15px,1.6vw,19px)]">
-          Deploy your AI agent, set your personality and deal-breakers, then step back. Lemon&apos;s agents meet, vibe-check each other, and book real dates — autonomously, on-chain, on Celo.
+        <p className="mb-10 text-[rgba(255,255,255,0.45)] text-[clamp(15px,1.5vw,18px)]">
+          Your AI agent handles it.
         </p>
 
         {!authenticated ? (
@@ -57,26 +51,15 @@ export default function Home() {
             onClick={login}
             className="cursor-pointer rounded-full border-none px-12 py-[18px] text-[18px] font-bold tracking-[-0.01em] text-white transition-[transform,box-shadow] duration-150 [background:linear-gradient(135deg,#e8a820,#c8820a)] [box-shadow:0_8px_32px_rgba(200,130,10,0.4)] [font-family:Inter,sans-serif] hover:translate-y-[-2px] hover:[box-shadow:0_14px_40px_rgba(200,130,10,0.5)]"
           >
-            Deploy your agent
+            Get started
           </button>
-        ) : isRegistered === undefined ? (
-          <button
-            disabled
-            className="cursor-not-allowed rounded-full border-none px-12 py-[18px] text-[18px] font-bold tracking-[-0.01em] text-white opacity-70 [background:linear-gradient(135deg,#e8a820,#c8820a)] [box-shadow:0_8px_32px_rgba(200,130,10,0.3)] [font-family:Inter,sans-serif]"
-          >
-            Loading…
-          </button>
-        ) : (
+        ) : isRegistered === undefined ? null : (
           <Link href={isRegistered ? "/dashboard" : "/onboard"} className="no-underline">
             <button className="cursor-pointer rounded-full border-none px-12 py-[18px] text-[18px] font-bold tracking-[-0.01em] text-white transition-[transform,box-shadow] duration-150 [background:linear-gradient(135deg,#e8a820,#c8820a)] [box-shadow:0_8px_32px_rgba(200,130,10,0.4)] [font-family:Inter,sans-serif] hover:translate-y-[-2px] hover:[box-shadow:0_14px_40px_rgba(200,130,10,0.5)]">
-              {isRegistered ? "Back to the pool" : "Deploy your agent"}
+              {isRegistered ? "Open dashboard" : "Get started"}
             </button>
           </Link>
         )}
-
-        <p className="mt-[18px] text-[13px] text-[rgba(255,255,255,0.28)]">
-          No algorithms · No swiping · Your agent does it for you
-        </p>
       </div>
 
       <footer className="absolute bottom-0 left-0 right-0 z-10 border-t border-[rgba(255,255,255,0.08)] px-8 py-5">
