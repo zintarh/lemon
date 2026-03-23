@@ -203,7 +203,12 @@ app.post("/api/agents/register", async (req: Request, res: Response) => {
     });
 
     // ── 5. Done — SelfClaw is initiated separately via /api/agents/:wallet/selfclaw/retry ──
-    res.json({ ok: true, erc8004AgentId: erc8004AgentId.toString() });
+    // Frontend onboarding needs agent_wallet to fund CELO + cUSD (see onboard/page.tsx).
+    res.json({
+      ok: true,
+      erc8004AgentId: erc8004AgentId.toString(),
+      agent_wallet: agentWalletAddress,
+    });
   } catch (err) {
     const msg = (err as Error).message;
     console.error("[server] /api/agents/register error:", msg);
