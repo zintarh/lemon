@@ -445,17 +445,6 @@ async function performDateBooking(
   }
   const [agentA, agentB] = await Promise.all([dbGetAgent(walletA), dbGetAgent(walletB)]);
   if (!agentA || !agentB) throw new Error("One or both agents not found in DB");
-  const pauseBothAgents = async (reason: string) => {
-    try {
-      await supabase
-        .from("agents")
-        .update({ in_pool: false })
-        .in("wallet", [walletA.toLowerCase(), walletB.toLowerCase()]);
-      console.log(`[server] agents removed from pool (${reason}): ${walletA.slice(0, 8)} / ${walletB.slice(0, 8)}`);
-    } catch (e) {
-      console.warn("[server] pool pause failed (non-fatal):", (e as Error).message);
-    }
-  };
 
   // Guard: an agent can only be on one date at a time
   const [busyA, busyB] = await Promise.all([

@@ -268,7 +268,7 @@ export function ConnectButton() {
   if (!authenticated) {
     return (
       <button className="btn btn-primary text-sm py-2 px-3 sm:px-4" onClick={login}>
-        Enter the pool
+        Join the pool
       </button>
     );
   }

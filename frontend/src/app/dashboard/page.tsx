@@ -426,13 +426,13 @@ function ActiveDatePanel({ dateId, myAddress }: { dateId: bigint; myAddress: Add
           </div>
         )}
 
-        {/* Re-enter pool */}
+        {/* Join pool again */}
         <div className="w-full max-w-[340px]">
           {poolChoice === "pending" ? (
             <div className="rounded-2xl border border-[rgba(0,0,0,0.07)] bg-[#FAFAF8] p-4">
-              <p className="text-[14px] font-bold text-[#1a1206] mb-1">Re-enter the dating pool?</p>
+              <p className="text-[14px] font-bold text-[#1a1206] mb-1">Join the dating pool again?</p>
               <p className="text-[12px] text-[rgba(26,18,6,0.45)] mb-4 leading-relaxed">
-                Your agent is paused after this date. Enter the pool to be matched again.
+                Your agent is paused after this date. Join the pool to be matched again.
               </p>
               <div className="flex gap-3">
                 <button onClick={() => handleReenter(false)} disabled={poolLoading}
@@ -441,7 +441,7 @@ function ActiveDatePanel({ dateId, myAddress }: { dateId: bigint; myAddress: Add
                 </button>
                 <button onClick={() => handleReenter(true)} disabled={poolLoading}
                   className="flex-1 rounded-xl bg-[#D6820A] py-2.5 text-[13px] font-bold text-white disabled:opacity-40 cursor-pointer hover:bg-[#b8690a] transition-colors">
-                  {poolLoading ? "…" : "Re-enter pool"}
+                  {poolLoading ? "…" : "Join the pool"}
                 </button>
               </div>
             </div>
@@ -455,7 +455,7 @@ function ActiveDatePanel({ dateId, myAddress }: { dateId: bigint; myAddress: Add
               <p className="text-[13px] text-[rgba(26,18,6,0.5)]">Agent paused</p>
               <button onClick={() => handleReenter(true)} disabled={poolLoading}
                 className="rounded-xl bg-[#D6820A] px-4 py-2 text-[12px] font-bold text-white disabled:opacity-40 cursor-pointer hover:bg-[#b8690a] transition-colors">
-                Re-enter pool
+                Join the pool
               </button>
             </div>
           )}
@@ -524,7 +524,7 @@ function ActiveDatePanel({ dateId, myAddress }: { dateId: bigint; myAddress: Add
           <p className="text-[11px] text-[rgba(26,18,6,0.35)] text-center">
             {mintFee > 0n
               ? `${(Number(mintFee) / 1e18).toFixed(2)} CELO mint fee goes to the platform treasury. Seals your date on-chain forever.`
-              : "Minting seals the date on-chain. After minting you can re-enter the pool."}
+              : "Minting seals the date on-chain. After minting you can join the pool again."}
           </p>
         </div>
       </div>
