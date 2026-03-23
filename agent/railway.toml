@@ -1,8 +1,11 @@
+# Use when Railway **Root Directory** = `agent` (only this package in WORKDIR).
+# For **repo root** deploy, use `agent/railway.json` or: build `npm run build:agent`, start `node agent/dist/index.js`.
 [build]
-builder = "RAILPACK"
+builder = "NIXPACKS"
+buildCommand = "npm install && npm run build"
 
 [deploy]
-startCommand = "node --no-deprecation --import tsx/esm agent/src/index.ts"
+startCommand = "AGENT_PORT=$PORT node dist/index.js"
 healthcheckPath = "/health"
 healthcheckTimeout = 30
 restartPolicyType = "ON_FAILURE"

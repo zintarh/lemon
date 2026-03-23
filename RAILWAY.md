@@ -34,6 +34,26 @@ Do **not** use the root default `npm run build` (that builds the **server**). Se
 
 Prefer **Vercel** for the Next app; see `frontend/VERCEL.md`.
 
+## Error: `Cannot find module '/app/agent/dist/index.js'`
+
+The **agent** service is starting **`node agent/dist/index.js`** but **`npm run build` at the repo root only builds the server** (`build` → `@lemon/server`). Nothing compiled the agent.
+
+**Fix:** Set **Build Command** to:
+
+```bash
+npm install && npm run build:agent
+```
+
+**Start Command** (listen on Railway’s `PORT`):
+
+```bash
+AGENT_PORT=$PORT node agent/dist/index.js
+```
+
+`agent/railway.json` / `agent/railway.toml` in this repo are updated to match.
+
+---
+
 ## Error: `Cannot find module '/app/dist/index.js'`
 
 Railway is running **`node dist/index.js`** from the **repo root** (`/app`). In this monorepo, `tsc` writes to **`server/dist/index.js`**, not `/app/dist/index.js`.
