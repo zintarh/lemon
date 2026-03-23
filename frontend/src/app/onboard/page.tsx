@@ -550,36 +550,23 @@ export default function OnboardPage() {
   }, [ready, authenticated, router]);
   const { register, isPending, isConfirming, isSuccess, error } = useRegisterAgent();
 
-  // Step 1 — send CELO for gas
+  // Step 1 — send CELO for gas (agent wallet needs gas to book dates on-chain)
   const { sendTransaction: sendCelo, data: celoHash, isPending: isCeloPending, error: celoTxError } = useSendTransaction();
   const { isLoading: isCeloConfirming, isSuccess: isCeloSuccess, isError: isCeloReceiptError } = useWaitForTransactionReceipt({ hash: celoHash });
-
-  // Step 2 — send cUSD for dates
-  const { writeContract: writeCusd, data: cusdHash, isPending: isCusdPending, error: cusdTxError } = useWriteContract();
-  const { isLoading: isCusdConfirming, isSuccess: isCusdSuccess, isError: isCusdReceiptError } = useWaitForTransactionReceipt({ hash: cusdHash });
 
   // Agent wallet address returned from server after registration
   const [agentWalletAddress, setAgentWalletAddress] = useState<string | null>(null);
   const [agentWalletLoading, setAgentWalletLoading] = useState(false);
-  const [fundStep, setFundStep] = useState<"celo" | "cusd" | "identity" | "done">("celo");
+  const [fundStep, setFundStep] = useState<"celo" | "identity" | "done">("celo");
   const [identityStatus, setIdentityStatus] = useState<"pending" | "ok" | "failed">("pending");
 
-  // Show toast on CELO/cUSD tx errors
   useEffect(() => {
     if (celoTxError) toast.error("CELO transfer failed", { description: celoTxError.message?.split("\n")[0] ?? "Transaction rejected." });
   }, [celoTxError]);
 
   useEffect(() => {
-    if (cusdTxError) toast.error("cUSD transfer failed", { description: cusdTxError.message?.split("\n")[0] ?? "Transaction rejected." });
-  }, [cusdTxError]);
-
-  useEffect(() => {
     if (isCeloReceiptError) toast.error("CELO transaction dropped", { description: "The transaction didn't confirm. Please try again." });
   }, [isCeloReceiptError]);
-
-  useEffect(() => {
-    if (isCusdReceiptError) toast.error("cUSD transaction dropped", { description: "The transaction didn't confirm. Please try again." });
-  }, [isCusdReceiptError]);
 
   // Retry fetching agent wallet from server (called if first attempt failed)
   const retryFetchAgentWallet = useCallback(async () => {
@@ -607,10 +594,6 @@ export default function OnboardPage() {
     finally { setAgentWalletLoading(false); }
   }, [walletAddress]);
 
-  // cUSD amount — minimum $2, user picks from presets
-  const SPEND_PRESETS = [2, 5, 10, 20] as const;
-  const [spendLimit, setSpendLimit] = useState<number>(5);
-
   // CELO gas amount — 0.05 CELO covers ~50+ transactions
   const CELO_GAS_AMOUNT = parseUnits("0.05", 18);
 
@@ -619,25 +602,10 @@ export default function OnboardPage() {
     sendCelo({ to: agentWalletAddress as `0x${string}`, value: CELO_GAS_AMOUNT });
   }
 
-  function handleSendCusd() {
-    if (!agentWalletAddress) return;
-    writeCusd({
-      address: CUSD_ADDRESS,
-      abi: erc20Abi,
-      functionName: "transfer",
-      args: [agentWalletAddress as `0x${string}`, parseUnits(spendLimit.toString(), 18)],
-    });
-  }
-
-  // After CELO confirms → move to cUSD step
+  // After CELO confirms → trigger identity registration
   useEffect(() => {
-    if (isCeloSuccess) setFundStep("cusd");
+    if (isCeloSuccess) setFundStep("identity");
   }, [isCeloSuccess]);
-
-  // After cUSD confirms → trigger on-chain identity registration
-  useEffect(() => {
-    if (isCusdSuccess) setFundStep("identity");
-  }, [isCusdSuccess]);
 
   // Auto-register ERC-8004 identity when fundStep becomes "identity"
   useEffect(() => {
@@ -741,29 +709,7 @@ export default function OnboardPage() {
           return;
         }
 
-        // 5. Check cUSD balance
-        const MIN_CUSD = parseUnits("2", 18);
-        let hasEnoughCusd = false;
-        if (agentWallet) {
-          try {
-            const bal = await publicClient.readContract({
-              address: CUSD_ADDRESS,
-              abi: erc20Abi,
-              functionName: "balanceOf",
-              args: [agentWallet as `0x${string}`],
-            }) as bigint;
-            hasEnoughCusd = bal >= MIN_CUSD;
-          } catch { /* assume unfunded */ }
-        }
-
-        if (!hasEnoughCusd) {
-          setFundStep("cusd");
-          setIsResumed(true);
-          setResumeCheck("done");
-          return;
-        }
-
-        // 6. Fully onboarded — redirect to dashboard
+        // 5. Fully onboarded — redirect to dashboard
         router.replace("/dashboard");
       } catch {
         setResumeCheck("done"); // Something went wrong — fall through to form
@@ -1036,10 +982,10 @@ export default function OnboardPage() {
             {name || template?.title || "Your agent"} is in the pool.
           </h1>
           <p className="text-[#1a1206]/50 text-[clamp(13px,1.8vh,15px)] leading-[1.65] mb-[clamp(20px,3.5vh,28px)]">
-            Fund your agent and we&apos;ll handle the rest automatically.
+            One quick step and your agent is ready to mingle.
           </p>
 
-          {/* Three-step setup */}
+          {/* Two-step setup */}
           <div className="rounded-2xl bg-[#D6820A]/[0.06] border border-[#D6820A]/20 p-[clamp(14px,2vh,20px)] mb-[clamp(14px,2vh,20px)] text-left flex flex-col gap-4">
 
             {/* Step 1 indicator */}
@@ -1049,25 +995,14 @@ export default function OnboardPage() {
               </div>
               <div className="flex-1">
                 <p className="text-[12px] font-bold text-[#1a1206]">Send 0.05 CELO — gas for transactions</p>
-                <p className="text-[11px] text-[#1a1206]/45">Your agent signs on-chain transactions. CELO covers the gas fees (~$0.02).</p>
+                <p className="text-[11px] text-[#1a1206]/45">Your agent books dates on-chain. CELO covers gas fees (~$0.02 total).</p>
               </div>
             </div>
 
-            {/* Step 2 indicator */}
-            <div className="flex items-center gap-3">
-              <div className={`w-6 h-6 rounded-full flex items-center justify-center text-[11px] font-bold shrink-0 ${isCusdSuccess || fundStep === "identity" || fundStep === "done" ? "bg-green-500 text-white" : fundStep === "cusd" ? "bg-[#D6820A] text-white" : "bg-[#1a1206]/10 text-[#1a1206]/40"}`}>
-                {isCusdSuccess || fundStep === "identity" || fundStep === "done" ? "✓" : "2"}
-              </div>
-              <div className="flex-1">
-                <p className={`text-[12px] font-bold ${fundStep === "cusd" || isCusdSuccess ? "text-[#1a1206]" : "text-[#1a1206]/40"}`}>Send cUSD — minimum $2 to enter the pool</p>
-                <p className="text-[11px] text-[#1a1206]/45">Each date costs ~$0.50–$1.00. Agents with less than $2 cUSD are skipped by the matcher.</p>
-              </div>
-            </div>
-
-            {/* Step 3 indicator — auto, no user action */}
+            {/* Step 2 indicator — auto, no user action */}
             <div className="flex items-center gap-3">
               <div className={`w-6 h-6 rounded-full flex items-center justify-center text-[11px] font-bold shrink-0 ${fundStep === "done" && identityStatus === "ok" ? "bg-green-500 text-white" : fundStep === "identity" ? "bg-[#D6820A] text-white" : "bg-[#1a1206]/10 text-[#1a1206]/40"}`}>
-                {fundStep === "done" && identityStatus === "ok" ? "✓" : fundStep === "identity" ? <LemonPulseLoader className="h-3 w-3" /> : "3"}
+                {fundStep === "done" && identityStatus === "ok" ? "✓" : fundStep === "identity" ? <LemonPulseLoader className="h-3 w-3" /> : "2"}
               </div>
               <div className="flex-1">
                 <p className={`text-[12px] font-bold ${fundStep === "identity" || fundStep === "done" ? "text-[#1a1206]" : "text-[#1a1206]/40"}`}>
@@ -1106,39 +1041,6 @@ export default function OnboardPage() {
               )
             )}
 
-            {/* Step 2 — cUSD action */}
-            {fundStep === "cusd" && (
-              <div className="flex flex-col gap-2">
-                <div className="flex gap-2">
-                  {SPEND_PRESETS.map(amt => (
-                    <button
-                      key={amt}
-                      onClick={() => setSpendLimit(amt)}
-                      className="flex-1 rounded-xl border py-1.5 text-[12px] font-bold transition-colors cursor-pointer"
-                      style={{
-                        background: spendLimit === amt ? "#D6820A" : "white",
-                        color: spendLimit === amt ? "white" : "#92400e",
-                        borderColor: spendLimit === amt ? "#D6820A" : "rgba(214,130,10,0.3)",
-                      }}
-                    >
-                      ${amt}
-                    </button>
-                  ))}
-                </div>
-                <p className="text-[11px] text-[#1a1206]/40 text-center">
-                  Minimum $2 · Each date costs ~$0.50–$1.00
-                </p>
-                <button
-                  className="btn btn-primary w-full text-[clamp(12px,1.5vh,14px)]"
-                  style={{ opacity: isCusdPending || isCusdConfirming ? 0.55 : 1, cursor: isCusdPending || isCusdConfirming ? "not-allowed" : "pointer" }}
-                  disabled={isCusdPending || isCusdConfirming}
-                  onClick={handleSendCusd}
-                >
-                  {isCusdPending ? "Confirm in wallet…" : isCusdConfirming ? "Funding…" : `Send $${spendLimit} cUSD →`}
-                </button>
-              </div>
-            )}
-
             {/* Identity registration in progress */}
             {fundStep === "identity" && (
               <div className="flex items-center gap-2 text-[12px] text-[#1a1206]/50">
@@ -1156,7 +1058,7 @@ export default function OnboardPage() {
           </div>
 
           <p className="text-[clamp(10px,1.2vh,12px)] text-[#1a1206]/30 text-center">
-            Steps 1 and 2 require your wallet. Step 3 is automatic.
+            Step 1 requires your wallet. Step 2 is automatic. Dating is free — you only pay to mint your memory NFT.
           </p>
         </div>
       </div>
