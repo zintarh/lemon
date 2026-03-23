@@ -12,7 +12,6 @@ const SERVER = process.env.NEXT_PUBLIC_SERVER_URL ?? "http://localhost:4000";
 
 // Celo mainnet token addresses
 const CUSDC_MAINNET = "0xcebA9300f2b948710d2653dD7B07f33A8B32118C" as const;
-const USDT_MAINNET  = "0x48065fbBE25f71C9282ddf5e1cD6D6A887483D5e" as const;
 
 function fmt(value: bigint | undefined, decimals: number, dp = 2): string {
   if (value === undefined) return "—";
@@ -261,10 +260,6 @@ export function ConnectButton() {
     address, token: isMainnet ? CUSDC_MAINNET : undefined,
     query: { enabled: !!address && isMainnet },
   });
-  const { data: usdtBalance } = useBalance({
-    address, token: isMainnet ? USDT_MAINNET : undefined,
-    query: { enabled: !!address && isMainnet },
-  });
 
   if (!ready) return <div className="h-9 w-28 rounded-xl bg-gray-800 animate-pulse" />;
 
@@ -321,10 +316,7 @@ export function ConnectButton() {
           <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Balances</p>
           <BalanceRow label="CELO" value={fmt(celoBalance?.value, celoBalance?.decimals ?? 18)} />
           {isMainnet ? (
-            <>
-              <BalanceRow label="cUSDC" value={fmt(cusdcBalance?.value, cusdcBalance?.decimals ?? 6)} />
-              <BalanceRow label="USDT"  value={fmt(usdtBalance?.value, usdtBalance?.decimals ?? 6)} />
-            </>
+            <BalanceRow label="cUSDC" value={fmt(cusdcBalance?.value, cusdcBalance?.decimals ?? 6)} />
           ) : (
             <p className="text-xs text-gray-400 italic mt-1">Token balances on mainnet only</p>
           )}
