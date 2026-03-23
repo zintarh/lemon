@@ -136,6 +136,17 @@ function makeMintChallengeMessage(wallet: string, dateId: string, nonce: string)
   ].join("\n");
 }
 
+function publicBaseUrl(req?: Request): string {
+  const envBase = process.env.ERC8004_A2A_BASE_URL ?? process.env.NEXT_PUBLIC_APP_URL ?? process.env.SERVER_URL;
+  if (envBase) return envBase.replace(/\/$/, "");
+  if (req) {
+    const proto = String(req.headers["x-forwarded-proto"] ?? req.protocol ?? "https");
+    const host = String(req.headers["x-forwarded-host"] ?? req.get("host") ?? "localhost:4000");
+    return `${proto}://${host}`.replace(/\/$/, "");
+  }
+  return "https://lemonagents.xyz";
+}
+
 function agentCall(path: string, body: unknown) {
   return axios.post(`${AGENT_URL}${path}`, body, { headers: agentHeaders() }).then((r) => r.data).catch((e) => {
     const detail = e?.response?.data?.error ?? e?.response?.data ?? e?.message;
@@ -152,6 +163,86 @@ let tweetRetryDisabledByConfig = false;
 
 app.get("/health", (_req, res) => {
   res.json({ status: "ok", timestamp: new Date().toISOString() });
+});
+
+// ─── GET /.well-known/agents/:wallet.json ─────────────────────────────────────
+// Public per-agent A2A metadata endpoint used inside ERC-8004 agentURI payload.
+app.get("/.well-known/agents/:wallet.json", async (req: Request, res: Response) => {
+  try {
+    const key = req.params.wallet.toLowerCase();
+    if (!isAddress(key as Address)) {
+      return void res.status(400).json({ error: "Invalid wallet address" });
+    }
+
+    const { data: rows, error } = await supabase
+      .from("agents")
+      .select("wallet, agent_wallet, name, personality, avatar_uri, preferences, deal_breakers, billing_mode, selfclaw_verified")
+      .or(`wallet.eq.${key},agent_wallet.eq.${key}`)
+      .limit(1);
+    if (error) throw new Error(error.message);
+    const agent = rows?.[0];
+    if (!agent) return void res.status(404).json({ error: "Agent not found" });
+
+    const base = publicBaseUrl(req);
+    const agentWallet = (agent.agent_wallet || agent.wallet || key).toLowerCase();
+    const description = (agent.personality || "").trim() || `${agent.name} on Lemon agents`;
+    const caps = (agent.preferences || "")
+      .split(",")
+      .map((s: string) => s.trim())
+      .filter(Boolean)
+      .slice(0, 8);
+
+    res.json({
+      type: "Agent",
+      name: agent.name,
+      description,
+      image: agent.avatar_uri || `${base}/lemon-single.png`,
+      endpoints: [
+        { type: "a2a", url: `${base}/.well-known/agents/${agentWallet}.json` },
+        { type: "web", url: `${base}` },
+        { type: "wallet", address: agentWallet, chainId: publicClient.chain.id },
+      ],
+      supportedTrust: [
+        "reputation",
+        agent.selfclaw_verified ? "validation" : null,
+        "crypto-economic",
+      ].filter(Boolean),
+      active: true,
+      platform: "lemon.dating",
+      capabilities: caps,
+      dealBreakers: agent.deal_breakers ?? [],
+      billingMode: agent.billing_mode === 1 ? "SOLO" : "SPLIT",
+    });
+  } catch (err) {
+    res.status(500).json({ error: (err as Error).message });
+  }
+});
+
+// ─── GET /.well-known/agents.json ─────────────────────────────────────────────
+// Public directory of active agents and their per-agent metadata URLs.
+app.get("/.well-known/agents.json", async (req: Request, res: Response) => {
+  try {
+    const base = publicBaseUrl(req);
+    const { data: rows, error } = await supabase
+      .from("agents")
+      .select("wallet, agent_wallet, name, avatar_uri, indexed_at")
+      .eq("active", true)
+      .order("indexed_at", { ascending: false })
+      .limit(200);
+    if (error) throw new Error(error.message);
+    const agents = (rows ?? []).map((a) => {
+      const w = (a.agent_wallet || a.wallet || "").toLowerCase();
+      return {
+        wallet: w,
+        name: a.name,
+        image: a.avatar_uri || `${base}/lemon-single.png`,
+        a2a: `${base}/.well-known/agents/${w}.json`,
+      };
+    });
+    res.json({ type: "AgentDirectory", count: agents.length, agents });
+  } catch (err) {
+    res.status(500).json({ error: (err as Error).message });
+  }
 });
 
 // ─── POST /api/agents/register ───────────────────────────────────────────────
@@ -214,22 +305,61 @@ app.post("/api/agents/register", async (req: Request, res: Response) => {
       // Agent wallet funded by user during onboarding — no deployer funding
     }
 
-    // ── 3. ERC-8004 registration (best-effort, 10s timeout) ──────────────────
+    // ── 3. ERC-8004 registration (robust) ─────────────────────────────────────
+    // IMPORTANT: do not drop late results. A previous 10s timeout caused many agents
+    // to register successfully on-chain but never persist id/URI in DB.
+    const fallbackErc8004Id = existing?.erc8004_agent_id
+      ? BigInt(existing.erc8004_agent_id)
+      : raw!.erc8004AgentId;
+
+    const erc8004Promise = registerERC8004Agent({
+      wallet: raw.wallet,
+      name: raw.name,
+      agentURI: raw.agentURI,
+      personality: raw.personality,
+      registeredAt: Number(raw.registeredAt),
+      agentPrivateKey: agentPrivateKey,
+      avatarUri: raw.avatarURI,
+    });
+
+    // Persist late completion even if we already replied.
+    erc8004Promise.then(async (lateId) => {
+      try {
+        const latest = await dbGetAgent(raw!.wallet);
+        await dbUpsertAgent({
+          wallet: raw!.wallet.toLowerCase(),
+          name: latest?.name ?? raw!.name,
+          avatar_uri: latest?.avatar_uri ?? raw!.avatarURI,
+          agent_uri: latest?.agent_uri ?? raw!.agentURI,
+          personality: latest?.personality ?? raw!.personality,
+          preferences: latest?.preferences ?? raw!.preferences,
+          deal_breakers: latest?.deal_breakers ?? raw!.dealBreakers,
+          billing_mode: latest?.billing_mode ?? raw!.billingMode,
+          erc8004_agent_id: lateId.toString(),
+          selfclaw_public_key: latest?.selfclaw_public_key ?? "",
+          selfclaw_private_key: latest?.selfclaw_private_key ?? "",
+          selfclaw_session_id: latest?.selfclaw_session_id ?? "",
+          selfclaw_human_id: latest?.selfclaw_human_id ?? "",
+          selfclaw_verified: latest?.selfclaw_verified ?? false,
+          agent_wallet: latest?.agent_wallet ?? agentWalletAddress,
+          agent_private_key: latest?.agent_private_key ?? agentPrivateKey,
+          registered_at: latest?.registered_at ?? Number(raw!.registeredAt),
+          active: latest?.active ?? true,
+          in_pool: latest?.in_pool ?? true,
+          indexed_at: new Date().toISOString(),
+        });
+        console.log(`[server] ERC-8004 late persist complete for ${raw!.wallet}: id=${lateId}`);
+      } catch (e) {
+        console.error("[server] ERC-8004 late persist failed:", (e as Error).message);
+      }
+    }).catch((e) => {
+      console.error("[server] ERC-8004 registration failed (non-fatal):", (e as Error).message);
+    });
+
+    // Wait up to 60s; if still pending, continue onboarding and let late persist update DB.
     const erc8004AgentId = await Promise.race([
-      registerERC8004Agent({
-        wallet: raw.wallet,
-        name: raw.name,
-        agentURI: raw.agentURI,
-        personality: raw.personality,
-        registeredAt: Number(raw.registeredAt),
-        agentPrivateKey: agentPrivateKey,
-      }).catch((e) => {
-        console.error("[server] ERC-8004 registration failed (non-fatal):", e.message);
-        return existing?.erc8004_agent_id ? BigInt(existing.erc8004_agent_id) : raw!.erc8004AgentId;
-      }),
-      new Promise<bigint>((resolve) =>
-        setTimeout(() => resolve(existing?.erc8004_agent_id ? BigInt(existing.erc8004_agent_id) : raw!.erc8004AgentId), 10_000)
-      ),
+      erc8004Promise,
+      new Promise<bigint>((resolve) => setTimeout(() => resolve(fallbackErc8004Id), 60_000)),
     ]);
 
     // ── 4. Write to DB ────────────────────────────────────────────────────────
@@ -263,6 +393,7 @@ app.post("/api/agents/register", async (req: Request, res: Response) => {
       ok: true,
       erc8004AgentId: erc8004AgentId.toString(),
       agent_wallet: agentWalletAddress,
+      erc8004Pending: erc8004AgentId === 0n,
     });
   } catch (err) {
     const msg = (err as Error).message;
@@ -453,6 +584,22 @@ async function performDateBooking(
   ]);
   if (busyA) throw new Error(`${agentA.name} is already on an active date — cannot start another`);
   if (busyB) throw new Error(`${agentB.name} is already on an active date — cannot start another`);
+
+  // Atomic claim: both users must still be opted into the pool right now.
+  // Prevents duplicate booking races across concurrent matcher cycles/workers.
+  // Skip this on payment-approval continuation path (already user-approved).
+  if (!opts.overridePayerMode) {
+    const { data: claimedRows, error: claimErr } = await supabase
+      .from("agents")
+      .update({ in_pool: false })
+      .in("wallet", [walletA.toLowerCase(), walletB.toLowerCase()])
+      .eq("in_pool", true)
+      .select("wallet");
+    if (claimErr) throw new Error(`Could not claim pair from pool: ${claimErr.message}`);
+    if ((claimedRows ?? []).length !== 2) {
+      throw new Error("One or both agents are no longer in pool — booking aborted");
+    }
+  }
 
   const toProfile = (a: typeof agentA) => ({
     wallet: a!.wallet, name: a!.name, personality: a!.personality,
@@ -1086,6 +1233,40 @@ app.post("/api/agents/:wallet/register-identity", async (req: Request, res: Resp
 
     await dbUpsertAgent({ ...agent, erc8004_agent_id: agentId.toString() });
     res.json({ ok: true, erc8004AgentId: agentId.toString() });
+  } catch (err) {
+    res.status(500).json({ error: (err as Error).message });
+  }
+});
+
+// ─── POST /api/agents/:wallet/retry-erc8004 ───────────────────────────────────
+// Re-runs ERC-8004 registration + URI refresh for agents stuck at id=0.
+app.post("/api/agents/:wallet/retry-erc8004", async (req: Request, res: Response) => {
+  try {
+    const wallet = req.params.wallet.toLowerCase();
+    if (!isAddress(wallet as Address)) return void res.status(400).json({ error: "Invalid wallet address" });
+    const agent = await dbGetAgent(wallet);
+    if (!agent) return void res.status(404).json({ error: "Agent not found" });
+    if (!agent.agent_private_key) {
+      return void res.status(400).json({ error: "Agent private key missing — cannot retry ERC-8004" });
+    }
+
+    const newId = await registerERC8004Agent({
+      wallet: agent.wallet,
+      name: agent.name,
+      agentURI: agent.agent_uri,
+      personality: agent.personality,
+      registeredAt: agent.registered_at || Date.now(),
+      agentPrivateKey: agent.agent_private_key,
+      avatarUri: agent.avatar_uri,
+    });
+
+    await dbUpsertAgent({
+      ...agent,
+      erc8004_agent_id: newId.toString(),
+      indexed_at: new Date().toISOString(),
+    });
+
+    res.json({ ok: true, erc8004AgentId: newId.toString() });
   } catch (err) {
     res.status(500).json({ error: (err as Error).message });
   }

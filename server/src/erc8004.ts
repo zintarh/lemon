@@ -113,31 +113,51 @@ async function uploadMetadataToIPFS(metadata: object, name: string): Promise<str
  */
 function buildERC8004Metadata(agent: AgentIdentityPayload, agentId?: bigint) {
   const agentAddress = privateKeyToAccount(agent.agentPrivateKey as Hex).address;
+  const appUrl = (
+    process.env.ERC8004_A2A_BASE_URL ??
+    process.env.NEXT_PUBLIC_APP_URL ??
+    process.env.SERVER_URL ??
+    "https://lemonagents.xyz"
+  ).replace(/\/$/, "");
+  const a2aUrl = process.env.ERC8004_A2A_URL_TEMPLATE
+    ? process.env.ERC8004_A2A_URL_TEMPLATE.replace("{wallet}", agentAddress.toLowerCase())
+    : `${appUrl}/.well-known/agents/${agentAddress.toLowerCase()}.json`;
+  const mcpUrl = process.env.ERC8004_MCP_URL ?? `${appUrl}/mcp`;
   const registrations = agentId !== undefined
     ? [{ agentId: agentId.toString(), agentRegistry: `eip155:${CHAIN_ID}:${REGISTRY_ADDRESS}` }]
     : [];
   return {
-    type: "https://eips.ethereum.org/EIPS/eip-8004#registration-v1",
+    // Match Celo ERC-8004 docs structure closely for AgentScan compatibility.
+    type: "Agent",
     name: agent.name,
     description: agent.personality,
     image: agent.avatarUri ?? "https://lemon.dating/lemon-single.png",
-    services: [
+    endpoints: [
       {
-        name: "web",
-        endpoint: "https://lemon.dating",
-        version: "1.0",
+        type: "a2a",
+        url: a2aUrl,
       },
       {
-        name: "agentWallet",
-        endpoint: `eip155:${CHAIN_ID}:${agentAddress}`,
-        version: "1.0",
+        type: "mcp",
+        url: mcpUrl,
+      },
+      {
+        type: "wallet",
+        address: agentAddress,
+        chainId: CHAIN_ID,
+      },
+      {
+        type: "web",
+        url: appUrl,
       },
     ],
+    // Keep explicit registry linkage after mint so indexers can map URI -> token.
     registrations,
-    supportedTrust: ["reputation", "crypto-economic"],
+    supportedTrust: ["reputation", "validation", "crypto-economic"],
     active: true,
-    x402Support: false,
+    x402Support: true,
     platform: "lemon.dating",
+    metadataVersion: "erc8004-celo-docs-v1",
   };
 }
 

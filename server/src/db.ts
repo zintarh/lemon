@@ -338,28 +338,23 @@ export async function dbUpsertContactReveal(row: Omit<ContactRevealRow, "updated
  */
 export async function dbAgentHasActiveDate(wallet: string): Promise<boolean> {
   const w = wallet.toLowerCase();
-  const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
   const { count } = await supabase
     .from("dates")
     .select("*", { count: "exact", head: true })
     .in("status", [0, 1])
-    .gte("indexed_at", twoHoursAgo)
     .or(`agent_a.eq.${w},agent_b.eq.${w}`);
   return (count ?? 0) > 0;
 }
 
-/** Returns true if a pending (0) or active (1) date already exists between two agents,
- *  indexed within the last 2 hours. Older stuck rows are treated as expired.
- *  Uses `indexed_at` (see supabase/schema.sql — `dates` has no `created_at`). */
+/** Returns true if a pending (0) or active (1) date already exists between two agents.
+ *  No time window: unresolved dates must always block new auto-booking. */
 export async function dbHasActiveDateBetween(walletA: string, walletB: string): Promise<boolean> {
   const a = walletA.toLowerCase();
   const b = walletB.toLowerCase();
-  const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
   const { count } = await supabase
     .from("dates")
     .select("*", { count: "exact", head: true })
     .in("status", [0, 1])
-    .gte("indexed_at", twoHoursAgo)
     .or(
       `and(agent_a.eq.${a},agent_b.eq.${b}),and(agent_a.eq.${b},agent_b.eq.${a})`
     );
