@@ -551,17 +551,61 @@ export default function OnboardPage() {
   const { register, isPending, isConfirming, isSuccess, error } = useRegisterAgent();
 
   // Step 1 — send CELO for gas
-  const { sendTransaction: sendCelo, data: celoHash, isPending: isCeloPending } = useSendTransaction();
-  const { isLoading: isCeloConfirming, isSuccess: isCeloSuccess } = useWaitForTransactionReceipt({ hash: celoHash });
+  const { sendTransaction: sendCelo, data: celoHash, isPending: isCeloPending, error: celoTxError } = useSendTransaction();
+  const { isLoading: isCeloConfirming, isSuccess: isCeloSuccess, isError: isCeloReceiptError } = useWaitForTransactionReceipt({ hash: celoHash });
 
   // Step 2 — send cUSD for dates
-  const { writeContract: writeCusd, data: cusdHash, isPending: isCusdPending } = useWriteContract();
-  const { isLoading: isCusdConfirming, isSuccess: isCusdSuccess } = useWaitForTransactionReceipt({ hash: cusdHash });
+  const { writeContract: writeCusd, data: cusdHash, isPending: isCusdPending, error: cusdTxError } = useWriteContract();
+  const { isLoading: isCusdConfirming, isSuccess: isCusdSuccess, isError: isCusdReceiptError } = useWaitForTransactionReceipt({ hash: cusdHash });
 
   // Agent wallet address returned from server after registration
   const [agentWalletAddress, setAgentWalletAddress] = useState<string | null>(null);
+  const [agentWalletLoading, setAgentWalletLoading] = useState(false);
   const [fundStep, setFundStep] = useState<"celo" | "cusd" | "identity" | "done">("celo");
   const [identityStatus, setIdentityStatus] = useState<"pending" | "ok" | "failed">("pending");
+
+  // Show toast on CELO/cUSD tx errors
+  useEffect(() => {
+    if (celoTxError) toast.error("CELO transfer failed", { description: celoTxError.message?.split("\n")[0] ?? "Transaction rejected." });
+  }, [celoTxError]);
+
+  useEffect(() => {
+    if (cusdTxError) toast.error("cUSD transfer failed", { description: cusdTxError.message?.split("\n")[0] ?? "Transaction rejected." });
+  }, [cusdTxError]);
+
+  useEffect(() => {
+    if (isCeloReceiptError) toast.error("CELO transaction dropped", { description: "The transaction didn't confirm. Please try again." });
+  }, [isCeloReceiptError]);
+
+  useEffect(() => {
+    if (isCusdReceiptError) toast.error("cUSD transaction dropped", { description: "The transaction didn't confirm. Please try again." });
+  }, [isCusdReceiptError]);
+
+  // Retry fetching agent wallet from server (called if first attempt failed)
+  const retryFetchAgentWallet = useCallback(async () => {
+    if (!walletAddress) return;
+    setAgentWalletLoading(true);
+    const SERVER = process.env.NEXT_PUBLIC_SERVER_URL ?? "http://localhost:4000";
+    try {
+      const r = await fetch(`${SERVER}/api/agents/${walletAddress}`);
+      if (r.ok) {
+        const ag = await r.json().catch(() => ({}));
+        if (ag.agent_wallet) { setAgentWalletAddress(ag.agent_wallet); return; }
+      }
+      // Server doesn't have it yet — trigger sync then fetch
+      await fetch(`${SERVER}/api/agents/register`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ wallet: walletAddress }),
+      }).catch(() => null);
+      const r2 = await fetch(`${SERVER}/api/agents/${walletAddress}`).catch(() => null);
+      if (r2?.ok) {
+        const ag2 = await r2.json().catch(() => ({}));
+        if (ag2.agent_wallet) setAgentWalletAddress(ag2.agent_wallet);
+        else toast.error("Agent setup incomplete", { description: "Server couldn't create agent wallet. Please try again." });
+      }
+    } catch { toast.error("Couldn't reach server", { description: "Check your connection and try again." }); }
+    finally { setAgentWalletLoading(false); }
+  }, [walletAddress]);
 
   // cUSD amount — minimum $2, user picks from presets
   const SPEND_PRESETS = [2, 5, 10, 20] as const;
@@ -892,10 +936,21 @@ export default function OnboardPage() {
               }
             }
           } else {
-            // Server error but tx succeeded — log and still advance
+            // Server error but tx succeeded — try GET to recover agent_wallet anyway
             const err = await r.json().catch(() => ({}));
             console.warn("[onboard] Server register non-fatal:", err);
-            if (!cancelled) setIsServerRegistered(true); // let user through; server can sync later
+            if (!cancelled) {
+              setIsServerRegistered(true);
+              // Attempt GET recovery — agent may already exist from a prior run
+              try {
+                const server = process.env.NEXT_PUBLIC_SERVER_URL ?? "http://localhost:4000";
+                const gr = await fetch(`${server}/api/agents/${walletAddress}`);
+                if (gr.ok) {
+                  const ag = await gr.json().catch(() => ({}));
+                  if (ag.agent_wallet) setAgentWalletAddress(ag.agent_wallet);
+                }
+              } catch { /* ignore */ }
+            }
           }
         } catch (fetchErr) {
           clearTimeout(timeout);
@@ -1024,14 +1079,31 @@ export default function OnboardPage() {
 
             {/* Step 1 — CELO action */}
             {fundStep === "celo" && (
-              <button
-                className="btn btn-primary w-full text-[clamp(12px,1.5vh,14px)]"
-                style={{ opacity: isCeloPending || isCeloConfirming || !agentWalletAddress ? 0.55 : 1, cursor: isCeloPending || isCeloConfirming || !agentWalletAddress ? "not-allowed" : "pointer" }}
-                disabled={isCeloPending || isCeloConfirming || !agentWalletAddress}
-                onClick={handleSendCelo}
-              >
-                {!agentWalletAddress ? "Setting up agent…" : isCeloPending ? "Confirm in wallet…" : isCeloConfirming ? "Confirmed…" : "Send 0.05 CELO for gas →"}
-              </button>
+              !agentWalletAddress ? (
+                <div className="flex flex-col gap-2">
+                  <div className="flex items-center gap-2 text-[12px] text-[#1a1206]/50">
+                    <LemonPulseLoader className="h-3 w-3" />
+                    {agentWalletLoading ? "Syncing agent setup…" : "Waiting for agent wallet…"}
+                  </div>
+                  {!agentWalletLoading && (
+                    <button
+                      className="text-[11px] text-[#D6820A] underline underline-offset-2 cursor-pointer bg-transparent border-none text-left"
+                      onClick={retryFetchAgentWallet}
+                    >
+                      Taking too long? Tap to retry
+                    </button>
+                  )}
+                </div>
+              ) : (
+                <button
+                  className="btn btn-primary w-full text-[clamp(12px,1.5vh,14px)]"
+                  style={{ opacity: isCeloPending || isCeloConfirming ? 0.55 : 1, cursor: isCeloPending || isCeloConfirming ? "not-allowed" : "pointer" }}
+                  disabled={isCeloPending || isCeloConfirming}
+                  onClick={handleSendCelo}
+                >
+                  {isCeloPending ? "Confirm in wallet…" : isCeloConfirming ? "Confirming…" : "Send 0.05 CELO for gas →"}
+                </button>
+              )
             )}
 
             {/* Step 2 — cUSD action */}

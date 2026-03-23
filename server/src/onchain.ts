@@ -684,3 +684,24 @@ export async function approveCusdForContract(
   await publicClient.waitForTransactionReceipt({ hash });
   console.log(`[onchain] ✓ cUSD approved: ${agentAddr} → ${spenderAddress}`);
 }
+
+/**
+ * Withdraws accumulated cUSD (or any ERC-20) from the LemonDate contract to a recipient.
+ * Only callable by the deployer (contract owner).
+ */
+export async function withdrawFromContract(
+  tokenAddress: Address,
+  recipient: Address,
+  amount: bigint,
+): Promise<string> {
+  const hash = await walletClient.writeContract({
+    address: process.env.LEMON_DATE_CONTRACT as Address,
+    abi: dateAbi,
+    functionName: "withdrawTokens",
+    args: [tokenAddress, recipient, amount],
+    chain,
+  });
+  await publicClient.waitForTransactionReceipt({ hash });
+  console.log(`[onchain] ✓ Withdrew ${amount} of ${tokenAddress} → ${recipient} (tx: ${hash})`);
+  return hash;
+}

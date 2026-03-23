@@ -76,9 +76,10 @@ function formatTime(seconds: number) {
 }
 
 function useCountdown(scheduledAt: bigint | undefined) {
-  const endMs = scheduledAt ? Number(scheduledAt) * 1000 + 30 * 60 * 1000 : 0;
+  const DATE_DURATION_S = 2 * 60; // 2 minutes
+  const endMs = scheduledAt ? Number(scheduledAt) * 1000 + DATE_DURATION_S * 1000 : 0;
   const [remaining, setRemaining] = useState(() =>
-    endMs ? Math.max(0, (endMs - Date.now()) / 1000) : 1800
+    endMs ? Math.max(0, (endMs - Date.now()) / 1000) : DATE_DURATION_S
   );
 
   useEffect(() => {
@@ -89,7 +90,7 @@ function useCountdown(scheduledAt: bigint | undefined) {
     return () => clearInterval(id);
   }, [endMs]);
 
-  const progress = Math.min(100, ((1800 - remaining) / 1800) * 100);
+  const progress = Math.min(100, ((DATE_DURATION_S - remaining) / DATE_DURATION_S) * 100);
   return { remaining, progress };
 }
 
@@ -309,7 +310,7 @@ function ActiveDatePanel({ dateId, myAddress }: { dateId: bigint; myAddress: Add
         </div>
         <Progress value={progress} className="h-[6px]" />
         <p className="mt-2 text-[11px] text-[rgba(26,18,6,0.28)]">
-          30-minute conversation · Date #{dateId.toString()}
+          2-minute conversation · Date #{dateId.toString()}
         </p>
       </div>
 
