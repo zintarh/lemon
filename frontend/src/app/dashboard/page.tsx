@@ -224,6 +224,26 @@ function ActiveDatePanel({ dateId, myAddress }: { dateId: bigint; myAddress: Add
         : record.agentA
       : undefined;
   const { data: partnerProfile } = useAgentProfile(partnerAddr);
+  const SERVER_URL = process.env.NEXT_PUBLIC_SERVER_URL ?? "http://localhost:4000";
+  const [poolChoice, setPoolChoice] = useState<"pending" | "yes" | "no">("pending");
+  const [poolLoading, setPoolLoading] = useState(false);
+
+  async function setActiveStatus(active: boolean) {
+    setPoolLoading(true);
+    try {
+      await fetch(`${SERVER_URL}/api/agents/${myAddress}/active`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ active }),
+      });
+      setPoolChoice(active ? "yes" : "no");
+    } catch {
+      // no-op — UI still updates optimistically
+      setPoolChoice(active ? "yes" : "no");
+    } finally {
+      setPoolLoading(false);
+    }
+  }
 
   if (!record) {
     return (
@@ -237,6 +257,81 @@ function ActiveDatePanel({ dateId, myAddress }: { dateId: bigint; myAddress: Add
   const partnerAvatar = resolveAvatar(partnerProfile?.avatarURI);
 
   const isDone = remaining === 0;
+
+  // Once the date is complete, replace the whole panel with a clean post-date screen
+  if (isDone && record.status === 2) {
+    const partnerName = partnerProfile?.name ?? shortAddr(partnerAddr ?? "0x0000");
+    const partnerAv = partnerAvatar;
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-6 px-6 text-center">
+        <div className="flex flex-col items-center gap-3">
+          <div className="flex items-center gap-[-8px]">
+            <div className="relative z-10 -mr-3">
+              {myAvatar ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img src={myAvatar} alt="" className="h-14 w-14 rounded-full border-2 border-white object-cover" />
+              ) : (
+                <div className="h-14 w-14 rounded-full border-2 border-white bg-amber-100 flex items-center justify-center text-[18px] font-bold text-amber-700">
+                  {myProfile?.name?.[0] ?? "?"}
+                </div>
+              )}
+            </div>
+            <div className="relative z-0">
+              {partnerAv ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img src={partnerAv} alt="" className="h-14 w-14 rounded-full border-2 border-white object-cover" />
+              ) : (
+                <div className="h-14 w-14 rounded-full border-2 border-white bg-indigo-100 flex items-center justify-center text-[18px] font-bold text-indigo-700">
+                  {partnerName[0]}
+                </div>
+              )}
+            </div>
+          </div>
+          <div>
+            <p className="text-[22px] font-black tracking-[-0.02em] text-[#1a1206]">Date complete! 🎉</p>
+            <p className="mt-1 text-[13px] text-[rgba(26,18,6,0.45)]">
+              Your date with {partnerName} has been sealed on-chain.
+            </p>
+          </div>
+        </div>
+
+        {poolChoice === "pending" ? (
+          <div className="w-full max-w-[320px] rounded-2xl border border-[rgba(0,0,0,0.07)] bg-[#FAFAF8] p-5">
+            <p className="mb-1 text-[14px] font-bold text-[#1a1206]">Re-enter the matching pool?</p>
+            <p className="mb-4 text-[12px] leading-relaxed text-[rgba(26,18,6,0.45)]">
+              Should your agent be available for new matches right away, or sit this one out?
+            </p>
+            <div className="flex gap-3">
+              <button
+                disabled={poolLoading}
+                onClick={() => setActiveStatus(false)}
+                className="flex-1 rounded-xl border border-[rgba(0,0,0,0.1)] bg-white py-2.5 text-[13px] font-semibold text-[rgba(26,18,6,0.6)] disabled:opacity-40 hover:bg-[rgba(0,0,0,0.03)] transition-colors cursor-pointer"
+              >
+                Not yet
+              </button>
+              <button
+                disabled={poolLoading}
+                onClick={() => setActiveStatus(true)}
+                className="flex-1 rounded-xl bg-[#D6820A] py-2.5 text-[13px] font-bold text-white disabled:opacity-40 hover:bg-[#b8690a] transition-colors cursor-pointer"
+              >
+                Yes, re-enter
+              </button>
+            </div>
+          </div>
+        ) : poolChoice === "yes" ? (
+          <div className="w-full max-w-[320px] rounded-2xl border border-emerald-200 bg-emerald-50 px-5 py-4 text-center">
+            <p className="text-[14px] font-bold text-emerald-800">Back in the pool!</p>
+            <p className="mt-1 text-[12px] text-emerald-600">Your agent is now available for new matches.</p>
+          </div>
+        ) : (
+          <div className="w-full max-w-[320px] rounded-2xl border border-[rgba(0,0,0,0.07)] bg-[#FAFAF8] px-5 py-4 text-center">
+            <p className="text-[14px] font-bold text-[#1a1206]">Taking a break</p>
+            <p className="mt-1 text-[12px] text-[rgba(26,18,6,0.45)]">Your agent won&apos;t be matched until you re-activate from settings.</p>
+          </div>
+        )}
+      </div>
+    );
+  }
 
   return (
     <div className="flex h-full flex-col gap-4">

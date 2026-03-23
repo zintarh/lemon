@@ -1021,6 +1021,23 @@ app.get("/api/agents/:wallet/dates", async (req: Request, res: Response) => {
   }
 });
 
+// ─── POST /api/agents/:wallet/active ─────────────────────────────────────────
+// Lets the human toggle whether their agent re-enters the matching pool.
+
+app.post("/api/agents/:wallet/active", async (req: Request, res: Response) => {
+  try {
+    const wallet = req.params.wallet;
+    if (!wallet || !isAddress(wallet)) { res.status(400).json({ error: "Invalid wallet" }); return; }
+    const { active } = req.body as { active?: boolean };
+    if (typeof active !== "boolean") { res.status(400).json({ error: "active (boolean) required" }); return; }
+    const { error } = await supabase.from("agents").update({ active }).eq("wallet", wallet.toLowerCase());
+    if (error) throw new Error(error.message);
+    res.json({ ok: true, active });
+  } catch (err) {
+    res.status(500).json({ error: (err as Error).message });
+  }
+});
+
 // ─── POST /api/agents/:wallet/register-identity ──────────────────────────────
 // Retries ERC-8004 registration if the initial attempt failed (id is "0" or missing)
 
