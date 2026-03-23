@@ -1133,15 +1133,31 @@ const REGISTRY_CONTRACT = IS_MAINNET
   : "0x8004A818BFB912233c491871b3d84c89A494BD9e";
 function IdentityBadge({ agentId }: { agentId: string }) {
   const [copied, setCopied] = useState(false);
+  // AgentScan uses internal UUIDs — fetch the UUID for this on-chain agentId
+  const [agentscanUrl, setAgentscanUrl] = useState<string>("https://agentscan.info/agents");
+
+  useEffect(() => {
+    if (!agentId || agentId === "0") return;
+    fetch(`https://agentscan.info/api/agents?network=celo&token_id=${agentId}`)
+      .then(r => r.json())
+      .then((data) => {
+        // API returns { agents: [...] } or array directly
+        const list = Array.isArray(data) ? data : (data?.agents ?? []);
+        const match = list.find((a: { token_id?: number | string; id?: string }) =>
+          String(a.token_id) === String(agentId)
+        );
+        if (match?.id) setAgentscanUrl(`https://agentscan.info/agents/${match.id}`);
+      })
+      .catch(() => {/* stay on fallback */});
+  }, [agentId]);
+
   function copy() {
     navigator.clipboard.writeText(agentId).then(() => {
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
     });
   }
-  // AgentScan uses internal UUIDs for agent URLs (not the on-chain integer ID).
-  // Link to the agents list — user can search by name or copy the ID below.
-  const explorerUrl = `https://agentscan.info/agents`;
+
   return (
     <div className="flex items-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2">
       <span className="flex h-5 w-5 items-center justify-center rounded-full bg-emerald-500 text-white text-[10px] font-bold shrink-0">✓</span>
@@ -1150,7 +1166,7 @@ function IdentityBadge({ agentId }: { agentId: string }) {
         <p className="text-[11px] font-mono text-emerald-900 truncate">ID #{agentId}</p>
       </div>
       <a
-        href={explorerUrl}
+        href={agentscanUrl}
         target="_blank"
         rel="noopener noreferrer"
         className="shrink-0 text-emerald-400 hover:text-emerald-700 transition-colors"
