@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { usePrivy } from "@privy-io/react-auth";
-import { useAccount, useReadContracts } from "wagmi";
+import { useAccount, useReadContracts, useBalance } from "wagmi";
 import { useRouter, useSearchParams } from "next/navigation";
 import { ConnectButton } from "@/components/ConnectButton";
 import { LemonPulseLoader } from "@/components/LemonPulseLoader";
@@ -1157,6 +1157,38 @@ function CopyableAddress({ label, address }: { label: string; address: string })
   );
 }
 
+const CUSD_MAINNET = "0xcebA9300f2b948710d2653dD7B07f33A8B32118C" as const;
+const IS_MAINNET_DASH = process.env.NEXT_PUBLIC_NETWORK === "mainnet";
+
+function AgentBalances({ agentAddress }: { agentAddress: string }) {
+  const addr = agentAddress as Address;
+  const { data: celo } = useBalance({ address: addr });
+  const { data: cusd } = useBalance({
+    address: addr,
+    token: IS_MAINNET_DASH ? CUSD_MAINNET : undefined,
+  });
+
+  const fmt = (val: bigint, dec: number) =>
+    (Number(val) / 10 ** dec).toFixed(4);
+
+  return (
+    <div className="flex gap-3 mt-1">
+      <div className="flex-1 rounded-lg bg-[rgba(26,18,6,0.04)] px-2.5 py-1.5">
+        <p className="text-[9px] font-bold uppercase tracking-wider text-[rgba(26,18,6,0.35)]">CELO</p>
+        <p className="text-[12px] font-mono font-semibold text-[#1a1206]">
+          {celo ? fmt(celo.value, celo.decimals) : "—"}
+        </p>
+      </div>
+      <div className="flex-1 rounded-lg bg-[rgba(26,18,6,0.04)] px-2.5 py-1.5">
+        <p className="text-[9px] font-bold uppercase tracking-wider text-[rgba(26,18,6,0.35)]">cUSD</p>
+        <p className="text-[12px] font-mono font-semibold text-[#1a1206]">
+          {cusd ? fmt(cusd.value, cusd.decimals) : "—"}
+        </p>
+      </div>
+    </div>
+  );
+}
+
 function WalletAddressCard({ userAddress, agentAddress }: { userAddress: string; agentAddress: string | null }) {
   return (
     <div className="rounded-xl border border-[rgba(26,18,6,0.08)] bg-[rgba(26,18,6,0.02)] px-3 py-2.5 flex flex-col gap-2.5">
@@ -1166,6 +1198,7 @@ function WalletAddressCard({ userAddress, agentAddress }: { userAddress: string;
         <>
           <div className="h-px bg-[rgba(26,18,6,0.06)]" />
           <CopyableAddress label="Agent wallet (top up CELO here)" address={agentAddress} />
+          <AgentBalances agentAddress={agentAddress} />
         </>
       )}
     </div>
