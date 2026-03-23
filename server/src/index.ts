@@ -23,6 +23,7 @@ import cors from "cors";
 import axios from "axios";
 import {
   bookDate,
+  cancelDate,
   completeDate,
   mintNFT,
   resolveNextPayer,
@@ -30,6 +31,7 @@ import {
   refundPayment,
   generateAgentWallet,
   setOperatorKey,
+  ensureOperatorSet,
   fundAgentWallet,
   publicClient,
   PaymentShortfallError,
@@ -153,10 +155,20 @@ app.post("/api/agents/register", async (req: Request, res: Response) => {
       agentWalletAddress = agentWallet.address.toLowerCase();
       agentPrivateKey = agentWallet.privateKey;
       console.log(`[server] Agent wallet created: ${agentWallet.address} (operator for ${raw.wallet})`);
-      // Set operator key in background — not critical for registration to succeed
-      void setOperatorKey(raw.wallet, agentWallet.address)
-        .then(() => console.log(`[server] Operator key set: ${raw!.wallet} → ${agentWallet.address}`))
-        .catch((e) => console.error("[server] setOperatorKey failed (non-fatal):", e.message));
+      // Set operator key — retry 3x in background so transient RPC errors don't permanently break booking
+      void (async () => {
+        for (let attempt = 1; attempt <= 3; attempt++) {
+          try {
+            await setOperatorKey(raw.wallet, agentWallet.address);
+            console.log(`[server] Operator key set: ${raw!.wallet} → ${agentWallet.address}`);
+            return;
+          } catch (e) {
+            console.warn(`[server] setOperatorKey attempt ${attempt}/3 failed:`, (e as Error).message);
+            if (attempt < 3) await new Promise((r) => setTimeout(r, 3000));
+          }
+        }
+        console.error(`[server] setOperatorKey permanently failed for ${raw.wallet} — ensureOperatorSet will retry at booking time`);
+      })();
       // Agent wallet funded by user during onboarding — no deployer funding
     }
 
@@ -444,6 +456,15 @@ async function performDateBooking(
   const agentWalletA = (agentA.agent_wallet ?? walletA) as Address;
   const agentWalletB = (agentB.agent_wallet ?? walletB) as Address;
 
+  // Ensure operator keys are set — required for bookDate / mintNFT / completeDate.
+  // setOperatorKey runs fire-and-forget at registration; this is the safety net.
+  await ensureOperatorSet(walletA, agentAKey).catch((e) =>
+    console.warn(`[booking] ensureOperatorSet failed for ${agentA.name}:`, (e as Error).message)
+  );
+  await ensureOperatorSet(walletB, agentBKey).catch((e) =>
+    console.warn(`[booking] ensureOperatorSet failed for ${agentB.name}:`, (e as Error).message)
+  );
+
   // Auto-top-up CELO: if either agent wallet has < 0.005 CELO, drip from deployer
   for (const [addr, name] of [[agentWalletA, agentA.name], [agentWalletB, agentB.name]] as [Address, string][]) {
     try {
@@ -469,10 +490,6 @@ async function performDateBooking(
   } catch (e) {
     const raw = (e as Error).message ?? "";
     if (raw.includes("insufficient funds") || raw.includes("exceeds the balance")) {
-      // The signer is the agent's own generated wallet (agent_wallet), NOT the user's wallet.
-      // Fetch CELO balance of both agent wallets so the message is accurate.
-      const agentWalletA = (agentA.agent_wallet ?? walletA) as Address;
-      const agentWalletB = (agentB.agent_wallet ?? walletB) as Address;
       const [balA, balB] = await Promise.all([
         publicClient.getBalance({ address: agentWalletA }).catch(() => 0n),
         publicClient.getBalance({ address: agentWalletB }).catch(() => 0n),
@@ -525,10 +542,10 @@ async function performDateBooking(
       metadataURI: plan.metadataURI, agentPrivateKey: signerKey,
     });
   } catch (mintErr) {
-    // Payment was already collected — refund both agents by returning cUSD from treasury
-    console.error("[server] mintNFT failed after payment — issuing refund", dateId.toString(), mintErr);
+    // Payment was already collected — cancel on-chain and refund cUSD to agent wallets
+    console.error("[server] mintNFT failed after payment — cancelling date and issuing refund", dateId.toString(), mintErr);
     await dbUpdateDate(dateId.toString(), { status: 3 });
-    await completeDate(dateId, 0n).catch(() => {});
+    await cancelDate(dateId).catch(() => {});
     await refundPayment({
       payerMode: payerMode as "AGENT_A" | "AGENT_B" | "SPLIT",
       agentAPrivateKey: agentAKey,

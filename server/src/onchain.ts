@@ -72,6 +72,7 @@ const dateAbi = parseAbi([
   "function cancelDate(uint256 dateId)",
   "function resolveNextPayer(address a, address b) returns (address payer)",
   "function getDate(uint256 dateId) view returns (uint256 id, address agentA, address agentB, uint8 template, uint8 status, uint8 payerMode, uint256 costUSD, address paymentToken, address payerA, address payerB, uint256 nftTokenId, uint256 scheduledAt, uint256 completedAt)",
+  "function withdrawTokens(address token, address to, uint256 amount)",
 ]);
 
 const nftAbi = parseAbi([
@@ -203,6 +204,11 @@ export async function completeDate(dateId: bigint, nftTokenId: bigint): Promise<
   await publicClient.waitForTransactionReceipt({ hash });
 }
 
+export async function cancelDate(dateId: bigint): Promise<void> {
+  const hash = await dateContract().write.cancelDate([dateId]);
+  await publicClient.waitForTransactionReceipt({ hash });
+}
+
 export async function mintNFT(params: {
   agentA: Address;
   agentB: Address;
@@ -287,6 +293,33 @@ export async function setOperatorKey(userWallet: Address, operatorWallet: Addres
   const hash = await agentContract().write.setOperatorKey([userWallet, operatorWallet]);
   await publicClient.waitForTransactionReceipt({ hash });
   console.log(`[onchain] Operator set: ${userWallet} → ${operatorWallet}`);
+}
+
+/**
+ * Verifies the agent wallet is registered as an operator for the user wallet.
+ * If not set (e.g. registration-time call failed), sets it now.
+ * Retries up to 3 times. Throws if it still can't be set.
+ */
+export async function ensureOperatorSet(userWallet: Address, agentPrivateKey: `0x${string}`): Promise<void> {
+  const { privateKeyToAddress: pta } = await import("viem/accounts");
+  const agentWallet = pta(agentPrivateKey);
+
+  const isSet = await agentContract().read.isOperatorFor([agentWallet, userWallet]) as boolean;
+  if (isSet) return; // already registered — nothing to do
+
+  console.warn(`[onchain] Operator not set for ${userWallet} — attempting to set now…`);
+  let lastErr: Error | undefined;
+  for (let i = 0; i < 3; i++) {
+    try {
+      await setOperatorKey(userWallet, agentWallet);
+      console.log(`[onchain] Operator set (late fix): ${userWallet} → ${agentWallet}`);
+      return;
+    } catch (e) {
+      lastErr = e as Error;
+      if (i < 2) await new Promise((r) => setTimeout(r, 2000));
+    }
+  }
+  throw new Error(`Cannot set operator key for ${userWallet}: ${lastErr?.message}`);
 }
 
 export async function getAllAgents(): Promise<Address[]> {
