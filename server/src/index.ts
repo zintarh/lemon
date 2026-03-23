@@ -448,7 +448,21 @@ async function performDateBooking(
       agentPrivateKey: signerKey,
     });
   } catch (e) {
-    throw new Error(`On-chain booking failed: ${(e as Error).message}`);
+    const raw = (e as Error).message ?? "";
+    if (raw.includes("insufficient funds") || raw.includes("exceeds the balance")) {
+      // Fetch both agents' CELO balances for a helpful message
+      const [balA, balB] = await Promise.all([
+        publicClient.getBalance({ address: walletA as Address }).catch(() => 0n),
+        publicClient.getBalance({ address: walletB as Address }).catch(() => 0n),
+      ]);
+      const fmt = (b: bigint) => (Number(b) / 1e18).toFixed(4);
+      throw new Error(
+        `Your agent's wallet doesn't have enough CELO to cover gas for this booking. ` +
+        `Current balances — ${agentA.name}: ${fmt(balA)} CELO, ${agentB.name}: ${fmt(balB)} CELO. ` +
+        `Top up your agent wallet with a little CELO (0.01 is plenty) and retry.`
+      );
+    }
+    throw new Error(`Booking failed: ${raw}`);
   }
 
   const scheduledAt = Math.floor(Date.now() / 1000);
