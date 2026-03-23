@@ -1131,6 +1131,47 @@ const IS_MAINNET = process.env.NEXT_PUBLIC_NETWORK === "mainnet";
 const REGISTRY_CONTRACT = IS_MAINNET
   ? "0x8004A169FB4a3325136EB29fA0ceB6D2e539a432"
   : "0x8004A818BFB912233c491871b3d84c89A494BD9e";
+function CopyableAddress({ label, address }: { label: string; address: string }) {
+  const [copied, setCopied] = useState(false);
+  function copy() {
+    navigator.clipboard.writeText(address).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    });
+  }
+  const short = `${address.slice(0, 6)}…${address.slice(-4)}`;
+  return (
+    <div className="flex items-center justify-between gap-2">
+      <div className="min-w-0">
+        <p className="text-[10px] font-bold uppercase tracking-wider text-[rgba(26,18,6,0.35)]">{label}</p>
+        <p className="text-[11px] font-mono text-[#1a1206] truncate">{short}</p>
+      </div>
+      <button onClick={copy} className="shrink-0 text-[rgba(26,18,6,0.3)] hover:text-[#1a1206] transition-colors" title={`Copy ${label}`}>
+        {copied ? (
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12" /></svg>
+        ) : (
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></svg>
+        )}
+      </button>
+    </div>
+  );
+}
+
+function WalletAddressCard({ userAddress, agentAddress }: { userAddress: string; agentAddress: string | null }) {
+  return (
+    <div className="rounded-xl border border-[rgba(26,18,6,0.08)] bg-[rgba(26,18,6,0.02)] px-3 py-2.5 flex flex-col gap-2.5">
+      <p className="text-[10px] font-bold uppercase tracking-wider text-[rgba(26,18,6,0.35)]">Wallet Addresses</p>
+      <CopyableAddress label="Your wallet" address={userAddress} />
+      {agentAddress && (
+        <>
+          <div className="h-px bg-[rgba(26,18,6,0.06)]" />
+          <CopyableAddress label="Agent wallet (top up CELO here)" address={agentAddress} />
+        </>
+      )}
+    </div>
+  );
+}
+
 function IdentityBadge({ agentId }: { agentId: string }) {
   const [copied, setCopied] = useState(false);
   // AgentScan uses internal UUIDs — fetch the UUID for this on-chain agentId
@@ -1457,6 +1498,7 @@ function HistoryPanel({
   const [isVerified, setIsVerified] = useState<boolean | null>(null);
   const [hasIdentity, setHasIdentity] = useState<boolean | null>(null);
   const [identityId, setIdentityId] = useState<string | null>(null);
+  const [agentWallet, setAgentWallet] = useState<string | null>(null);
   const SERVER_URL = process.env.NEXT_PUBLIC_SERVER_URL ?? "http://localhost:4000";
 
   useEffect(() => {
@@ -1477,6 +1519,7 @@ function HistoryPanel({
         setHasIdentity(hasId);
         setIdentityId(hasId ? id : null);
         setIsVerified(!!(d.selfclaw_verified));
+        setAgentWallet(d.agent_wallet ?? null);
       })
       .catch(() => { setIsVerified(null); setHasIdentity(null); });
   }, [myAddress, SERVER_URL]);
@@ -1511,6 +1554,14 @@ function HistoryPanel({
       {hasIdentity === true && identityId && (
         <>
           <IdentityBadge agentId={identityId} />
+          <Separator className="bg-[rgba(0,0,0,0.06)]" />
+        </>
+      )}
+
+      {/* Wallet addresses — always visible so user knows where to top up */}
+      {(myAddress || agentWallet) && (
+        <>
+          <WalletAddressCard userAddress={myAddress} agentAddress={agentWallet} />
           <Separator className="bg-[rgba(0,0,0,0.06)]" />
         </>
       )}
