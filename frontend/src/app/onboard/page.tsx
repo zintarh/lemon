@@ -560,7 +560,13 @@ export default function OnboardPage() {
 
   // Agent wallet address returned from server after registration
   const [agentWalletAddress, setAgentWalletAddress] = useState<string | null>(null);
-  const [fundStep, setFundStep] = useState<"celo" | "cusd" | "done">("celo");
+  const [fundStep, setFundStep] = useState<"celo" | "cusd" | "identity" | "done">("celo");
+
+  // Identity verification state (SelfClaw — auto-triggered after cUSD confirms)
+  const [identityStatus, setIdentityStatus] = useState<"idle" | "starting" | "qr" | "polling" | "verified" | "failed">("idle");
+  const [identityQr, setIdentityQr] = useState<string | null>(null);
+  const [identityDeepLink, setIdentityDeepLink] = useState<string | null>(null);
+  const identityPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // cUSD amount — minimum $2, user picks from presets
   const SPEND_PRESETS = [2, 5, 10, 20] as const;
@@ -589,10 +595,61 @@ export default function OnboardPage() {
     if (isCeloSuccess) setFundStep("cusd");
   }, [isCeloSuccess]);
 
-  // After cUSD confirms → go to dashboard
+  // After cUSD confirms → kick off identity verification
   useEffect(() => {
-    if (isCusdSuccess) router.push("/dashboard");
-  }, [isCusdSuccess, router]);
+    if (isCusdSuccess) setFundStep("identity");
+  }, [isCusdSuccess]);
+
+  // Auto-start SelfClaw verification when fundStep becomes "identity"
+  useEffect(() => {
+    if (fundStep !== "identity" || identityStatus !== "idle" || !walletAddress) return;
+
+    const SERVER = process.env.NEXT_PUBLIC_SERVER_URL ?? "http://localhost:4000";
+    setIdentityStatus("starting");
+
+    const startIdentity = async () => {
+      try {
+        const r = await fetch(`${SERVER}/api/agents/${walletAddress}/selfclaw/retry`, { method: "POST" });
+        if (!r.ok) { setIdentityStatus("failed"); return; }
+        const data = await r.json();
+        if (data.verified) {
+          setIdentityStatus("verified");
+          setTimeout(() => router.push("/dashboard"), 1500);
+          return;
+        }
+        if (data.started && data.qrData) {
+          setIdentityQr(data.qrData);
+          setIdentityDeepLink(data.deepLink ?? null);
+          setIdentityStatus("qr");
+          // Poll for completion
+          identityPollRef.current = setInterval(async () => {
+            try {
+              const pr = await fetch(`${SERVER}/api/agents/${walletAddress}`);
+              if (!pr.ok) return;
+              const ag = await pr.json();
+              if (ag.selfclaw_verified) {
+                clearInterval(identityPollRef.current!);
+                setIdentityStatus("verified");
+                setTimeout(() => router.push("/dashboard"), 1500);
+              }
+            } catch { /* keep polling */ }
+          }, 5000);
+          // Timeout after 5 min
+          setTimeout(() => {
+            if (identityPollRef.current) clearInterval(identityPollRef.current);
+            setIdentityStatus(s => s === "qr" || s === "polling" ? "failed" : s);
+          }, 5 * 60 * 1000);
+          return;
+        }
+        setIdentityStatus("failed");
+      } catch {
+        setIdentityStatus("failed");
+      }
+    };
+
+    startIdentity();
+    return () => { if (identityPollRef.current) clearInterval(identityPollRef.current); };
+  }, [fundStep, identityStatus, walletAddress, router]);
 
   const [onboardMode, setOnboardMode] = useState<"choose" | "template">("choose");
   const [showVoiceModal, setShowVoiceModal] = useState(false);
@@ -961,7 +1018,7 @@ export default function OnboardPage() {
   if (isSuccess || isResumed) return (
     <div className={pageClass}>
       <MiniHeader />
-      <div className="flex-1 flex items-center justify-center px-6">
+      <div className="flex-1 flex items-center justify-center px-6 overflow-y-auto py-6">
         <div className="max-w-[440px] w-full text-center">
           <div className="w-[clamp(52px,7vh,72px)] h-[clamp(52px,7vh,72px)] rounded-[20px] mx-auto mb-[clamp(16px,2.5vh,24px)] bg-green-600/10 border border-green-600/20 flex items-center justify-center text-[clamp(20px,3vh,28px)] text-green-600">
             ✓
@@ -970,16 +1027,16 @@ export default function OnboardPage() {
             {name || template?.title || "Your agent"} is in the pool.
           </h1>
           <p className="text-[#1a1206]/50 text-[clamp(13px,1.8vh,15px)] leading-[1.65] mb-[clamp(20px,3.5vh,28px)]">
-            Your agent joined the pool. To enter the dating queue it needs two things from your wallet: a little CELO for gas and cUSD to pay for dates.
+            Complete all three steps to enter the dating queue.
           </p>
 
-          {/* Two-step funding */}
+          {/* Three-step setup */}
           <div className="rounded-2xl bg-[#D6820A]/[0.06] border border-[#D6820A]/20 p-[clamp(14px,2vh,20px)] mb-[clamp(14px,2vh,20px)] text-left flex flex-col gap-4">
 
-            {/* Step indicators */}
+            {/* Step 1 indicator */}
             <div className="flex items-center gap-3">
-              <div className={`w-6 h-6 rounded-full flex items-center justify-center text-[11px] font-bold shrink-0 ${isCeloSuccess ? "bg-green-500 text-white" : "bg-[#D6820A] text-white"}`}>
-                {isCeloSuccess ? "✓" : "1"}
+              <div className={`w-6 h-6 rounded-full flex items-center justify-center text-[11px] font-bold shrink-0 ${isCeloSuccess || fundStep !== "celo" ? "bg-green-500 text-white" : "bg-[#D6820A] text-white"}`}>
+                {isCeloSuccess || fundStep !== "celo" ? "✓" : "1"}
               </div>
               <div className="flex-1">
                 <p className="text-[12px] font-bold text-[#1a1206]">Send 0.05 CELO — gas for transactions</p>
@@ -987,17 +1044,29 @@ export default function OnboardPage() {
               </div>
             </div>
 
+            {/* Step 2 indicator */}
             <div className="flex items-center gap-3">
-              <div className={`w-6 h-6 rounded-full flex items-center justify-center text-[11px] font-bold shrink-0 ${isCusdSuccess ? "bg-green-500 text-white" : fundStep === "cusd" ? "bg-[#D6820A] text-white" : "bg-[#1a1206]/10 text-[#1a1206]/40"}`}>
-                {isCusdSuccess ? "✓" : "2"}
+              <div className={`w-6 h-6 rounded-full flex items-center justify-center text-[11px] font-bold shrink-0 ${isCusdSuccess || (fundStep !== "celo" && fundStep !== "cusd") ? "bg-green-500 text-white" : fundStep === "cusd" ? "bg-[#D6820A] text-white" : "bg-[#1a1206]/10 text-[#1a1206]/40"}`}>
+                {isCusdSuccess || (fundStep !== "celo" && fundStep !== "cusd") ? "✓" : "2"}
               </div>
               <div className="flex-1">
-                <p className={`text-[12px] font-bold ${fundStep === "cusd" ? "text-[#1a1206]" : "text-[#1a1206]/40"}`}>Send cUSD — minimum $2 to enter the pool</p>
+                <p className={`text-[12px] font-bold ${fundStep === "cusd" || isCusdSuccess ? "text-[#1a1206]" : "text-[#1a1206]/40"}`}>Send cUSD — minimum $2 to enter the pool</p>
                 <p className="text-[11px] text-[#1a1206]/45">Each date costs ~$0.50–$1.00. Agents with less than $2 cUSD are skipped by the matcher.</p>
               </div>
             </div>
 
-            {/* Step 1 — CELO */}
+            {/* Step 3 indicator */}
+            <div className="flex items-center gap-3">
+              <div className={`w-6 h-6 rounded-full flex items-center justify-center text-[11px] font-bold shrink-0 ${identityStatus === "verified" ? "bg-green-500 text-white" : fundStep === "identity" ? "bg-[#D6820A] text-white" : "bg-[#1a1206]/10 text-[#1a1206]/40"}`}>
+                {identityStatus === "verified" ? "✓" : "3"}
+              </div>
+              <div className="flex-1">
+                <p className={`text-[12px] font-bold ${fundStep === "identity" || identityStatus === "verified" ? "text-[#1a1206]" : "text-[#1a1206]/40"}`}>Verify your identity — prove you&apos;re human</p>
+                <p className="text-[11px] text-[#1a1206]/45">Scan the QR code with the Self app. Gives your agent an on-chain identity.</p>
+              </div>
+            </div>
+
+            {/* Step 1 — CELO action */}
             {fundStep === "celo" && (
               <button
                 className="btn btn-primary w-full text-[clamp(12px,1.5vh,14px)]"
@@ -1009,7 +1078,7 @@ export default function OnboardPage() {
               </button>
             )}
 
-            {/* Step 2 — cUSD */}
+            {/* Step 2 — cUSD action */}
             {fundStep === "cusd" && (
               <div className="flex flex-col gap-2">
                 <div className="flex gap-2">
@@ -1037,14 +1106,64 @@ export default function OnboardPage() {
                   disabled={isCusdPending || isCusdConfirming}
                   onClick={handleSendCusd}
                 >
-                  {isCusdPending ? "Confirm in wallet…" : isCusdConfirming ? "Funded — entering the pool…" : `Send $${spendLimit} cUSD & enter the pool →`}
+                  {isCusdPending ? "Confirm in wallet…" : isCusdConfirming ? "Funded — verifying identity next…" : `Send $${spendLimit} cUSD →`}
                 </button>
+              </div>
+            )}
+
+            {/* Step 3 — Identity / SelfClaw */}
+            {fundStep === "identity" && (
+              <div className="flex flex-col items-center gap-3">
+                {(identityStatus === "starting") && (
+                  <div className="flex items-center gap-2 text-[12px] text-[#1a1206]/50">
+                    <LemonPulseLoader className="h-4 w-4" />
+                    Setting up your identity…
+                  </div>
+                )}
+
+                {(identityStatus === "qr" || identityStatus === "polling") && identityQr && (
+                  <>
+                    <p className="text-[12px] font-semibold text-[#1a1206]">Scan with the Self app to verify</p>
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img src={identityQr} alt="Self verification QR" className="w-48 h-48 rounded-2xl border border-[#D6820A]/20" />
+                    {identityDeepLink && (
+                      <a href={identityDeepLink} target="_blank" rel="noopener noreferrer"
+                        className="text-[11px] font-semibold text-[#D6820A] no-underline hover:underline">
+                        Or open Self app directly →
+                      </a>
+                    )}
+                    <div className="flex items-center gap-1.5 text-[11px] text-[#1a1206]/35">
+                      <LemonPulseLoader className="h-3 w-3" />
+                      Waiting for verification…
+                    </div>
+                  </>
+                )}
+
+                {identityStatus === "verified" && (
+                  <div className="flex items-center gap-2 text-[12px] font-bold text-green-700">
+                    <span>✓</span> Identity verified! Entering the pool…
+                  </div>
+                )}
+
+                {identityStatus === "failed" && (
+                  <>
+                    <p className="text-[12px] text-[#1a1206]/50 text-center">
+                      Couldn&apos;t complete identity verification right now. You can verify later using the button in the top-right corner.
+                    </p>
+                    <button
+                      className="btn btn-primary w-full text-[clamp(12px,1.5vh,14px)]"
+                      onClick={() => router.push("/dashboard?identityPending=true")}
+                    >
+                      Go to dashboard →
+                    </button>
+                  </>
+                )}
               </div>
             )}
           </div>
 
           <p className="text-[clamp(10px,1.2vh,12px)] text-[#1a1206]/30 text-center">
-            Both steps are required to enter the dating pool.
+            All three steps are required to enter the dating pool.
           </p>
         </div>
       </div>

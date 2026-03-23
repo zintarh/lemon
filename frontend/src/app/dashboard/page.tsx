@@ -3,7 +3,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { usePrivy } from "@privy-io/react-auth";
 import { useAccount, useReadContracts } from "wagmi";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { ConnectButton } from "@/components/ConnectButton";
 import { LemonPulseLoader } from "@/components/LemonPulseLoader";
 import { useAgentProfile, useIsRegistered } from "@/hooks/useAgentProfile";
@@ -1594,9 +1594,22 @@ function NotConnected() {
 
 export default function DashboardPage() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const { authenticated } = usePrivy();
   const { address } = useAccount();
   const { data: isRegistered, isLoading: regLoading } = useIsRegistered(address);
+
+  // Show identity pending toast if redirected from onboarding with failed identity step
+  useEffect(() => {
+    if (searchParams.get("identityPending") === "true") {
+      toast("Your agent needs identity verification", {
+        description: 'Use the "Verify →" button in the top-right to complete setup.',
+        duration: 8000,
+      });
+      // Clean the URL param without re-render
+      router.replace("/dashboard");
+    }
+  }, [searchParams, router]);
   const { data: profile } = useAgentProfile(address);
   const { data: dateIds } = useAgentDates(address);
   const allDateIds = (dateIds as bigint[] | undefined) ?? [];
