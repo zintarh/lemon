@@ -28,11 +28,13 @@ import {
   mintNFT,
   resolveNextPayer,
   collectPayment,
+  checkPaymentBalances,
   refundPayment,
   generateAgentWallet,
   setOperatorKey,
   ensureOperatorSet,
   fundAgentWallet,
+  withdrawFromContract,
   publicClient,
   PaymentShortfallError,
 } from "./onchain.js";
@@ -80,6 +82,16 @@ const CUSD_ADDRESS = (
 
 const DATE_COST_CENTS = Number(process.env.DATE_COST_CENTS ?? 100);
 const DATE_COST_USD_STR = (DATE_COST_CENTS / 100).toFixed(2); // e.g. "1.00"
+
+// Per-template total cost in USD. Each agent pays half in SPLIT mode.
+// e.g. BEACH = $1.50 total → each pays $0.75. Matches frontend DATE_TEMPLATE_DETAILS.
+const TEMPLATE_COST_USD: Record<string, string> = {
+  COFFEE:         "1.00",
+  BEACH:          "1.50",
+  WORK:           "1.00",
+  ROOFTOP_DINNER: "2.00",
+  GALLERY_WALK:   "1.50",
+};
 
 const VALID_DATE_TEMPLATES = new Set([
   "COFFEE",
@@ -514,7 +526,59 @@ async function performDateBooking(
   });
   console.log(`[server] date #${dateId} written to DB (status: ACTIVE)`);
 
-  // 4b. Collect payment — only after booking is confirmed on-chain.
+  // 4b. Resolve amount for this template, then check balances before touching money.
+  const amountUSD = TEMPLATE_COST_USD[template] ?? DATE_COST_USD_STR;
+
+  const shortfallErr = await checkPaymentBalances({
+    payerMode: payerMode as "AGENT_A" | "AGENT_B" | "SPLIT",
+    agentAPrivateKey: agentAKey,
+    agentBPrivateKey: agentBKey,
+    agentAName: agentA.name,
+    agentBName: agentB.name,
+    userWalletA: walletA,
+    userWalletB: walletB,
+    cUSDAddress: CUSD_ADDRESS,
+    amountUSD,
+  });
+
+  if (shortfallErr) {
+    // Cancel the on-chain booking so the slot is freed
+    await dbUpdateDate(dateId.toString(), { status: 3 });
+    console.warn("[server] Payment shortfall detected — saving approval request", shortfallErr.shortfalls.map(s => s.agentName));
+
+    // Persist paymentApproval to transcript so the frontend shows the approval UI
+    if (opts.convoId && shortfallErr.shortfalls.length === 1 && shortfallErr.funded.length === 1) {
+      const short = shortfallErr.shortfalls[0];
+      const funded = shortfallErr.funded[0];
+      const { data: convoRow } = await supabase.from("conversations").select("transcript").eq("id", opts.convoId).single();
+      const t = (convoRow?.transcript as Record<string, unknown>) ?? {};
+      await supabase.from("conversations").update({
+        transcript: {
+          ...t,
+          bookingPending: false,
+          bookingError: null,
+          paymentApproval: {
+            fundedWallet: funded.userWallet,
+            fundedAgentName: funded.agentName,
+            shortWallet: short.userWallet,
+            shortAgentName: short.agentName,
+            shortAgentWalletAddress: short.agentWalletAddress,
+            shortHas: short.has,
+            shortNeeds: short.needs,
+            fullAmountUSD: funded.fullAmountUSD,
+            status: "pending",
+            expiresAt: Date.now() + 30 * 60 * 1000,
+            template,
+            sharedInterests,
+          },
+        },
+      }).eq("id", opts.convoId);
+    }
+
+    throw shortfallErr;
+  }
+
+  // 4c. Collect payment — only after booking is confirmed on-chain.
   //     Gas is always paid in CELO (no feeCurrency set), never cUSD.
   try {
     await collectPayment({
@@ -525,7 +589,7 @@ async function performDateBooking(
       agentBName: agentB.name,
       treasuryAddress,
       cUSDAddress: CUSD_ADDRESS,
-      amountUSD: DATE_COST_USD_STR,
+      amountUSD,
     });
   } catch (payErr) {
     // Booking exists on-chain but payment failed — cancel the date so agents aren't charged later
@@ -554,7 +618,7 @@ async function performDateBooking(
       agentBName: agentB.name,
       treasuryAddress,
       cUSDAddress: CUSD_ADDRESS,
-      amountUSD: DATE_COST_USD_STR,
+      amountUSD,
     }).catch((refundErr) => console.error("[server] Refund also failed:", refundErr));
     throw mintErr;
   }
@@ -1022,6 +1086,66 @@ app.post("/api/admin/refresh-agentscan", async (req: Request, res: Response) => 
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     res.status(500).json({ error: msg });
+  }
+});
+
+// ─── POST /api/admin/withdraw ────────────────────────────────────────────────
+// Withdraws accumulated ERC-20 (e.g. cUSD) from the LemonDate contract.
+// Protected by ADMIN_SECRET. Sends to DEPLOYER_ADDRESS by default.
+
+app.post("/api/admin/withdraw", async (req: Request, res: Response) => {
+  const secret = req.headers["x-admin-secret"] ?? req.body?.adminSecret;
+  if (!process.env.ADMIN_SECRET || secret !== process.env.ADMIN_SECRET) {
+    res.status(403).json({ error: "Forbidden" });
+    return;
+  }
+
+  try {
+    const CUSD = process.env.CUSD_ADDRESS ?? "0x765DE816845861e75A25fCA122bb6898B8B1282a";
+    const token = (req.body?.token ?? CUSD) as Address;
+    const recipient = (req.body?.recipient ?? process.env.DEPLOYER_ADDRESS) as Address;
+    if (!recipient) { res.status(400).json({ error: "No recipient — set DEPLOYER_ADDRESS or pass recipient" }); return; }
+
+    // Read contract balance
+    const balance = await publicClient.readContract({
+      address: token as Address,
+      abi: parseAbi(["function balanceOf(address) view returns (uint256)"]),
+      functionName: "balanceOf",
+      args: [process.env.LEMON_DATE_CONTRACT as Address],
+    }) as bigint;
+
+    if (balance === 0n) { res.json({ ok: true, message: "Contract balance is 0 — nothing to withdraw", balance: "0" }); return; }
+
+    const amount = req.body?.amount ? BigInt(req.body.amount) : balance;
+    const hash = await withdrawFromContract(token as Address, recipient as Address, amount);
+    res.json({ ok: true, hash, amount: amount.toString(), recipient, token });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[admin/withdraw]", msg);
+    res.status(500).json({ error: msg });
+  }
+});
+
+// ─── GET /api/admin/balance ───────────────────────────────────────────────────
+// Returns current cUSD balance of the LemonDate contract. Protected by ADMIN_SECRET.
+
+app.get("/api/admin/balance", async (req: Request, res: Response) => {
+  const secret = req.headers["x-admin-secret"] ?? req.query?.adminSecret;
+  if (!process.env.ADMIN_SECRET || secret !== process.env.ADMIN_SECRET) {
+    res.status(403).json({ error: "Forbidden" });
+    return;
+  }
+  try {
+    const CUSD = process.env.CUSD_ADDRESS ?? "0x765DE816845861e75A25fCA122bb6898B8B1282a";
+    const balance = await publicClient.readContract({
+      address: CUSD as Address,
+      abi: parseAbi(["function balanceOf(address) view returns (uint256)"]),
+      functionName: "balanceOf",
+      args: [process.env.LEMON_DATE_CONTRACT as Address],
+    }) as bigint;
+    res.json({ balance: balance.toString(), balanceFormatted: formatUnits(balance, 18), contract: process.env.LEMON_DATE_CONTRACT, token: CUSD });
+  } catch (err: unknown) {
+    res.status(500).json({ error: String(err) });
   }
 });
 
