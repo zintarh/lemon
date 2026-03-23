@@ -198,9 +198,14 @@ export default function DatesPage() {
   const { data: totalMinted } = useTotalMinted();
   const total = totalMinted as bigint | null | undefined;
 
-  const tokenIds: bigint[] = total
-    ? Array.from({ length: Math.min(Number(total), 50) }, (_, i) => total - BigInt(i))
-    : [];
+  // tokenIds are 0-indexed in LemonNFT (first mint = #0). Build descending IDs correctly.
+  const tokenIds: bigint[] =
+    total && total > 0n
+      ? Array.from(
+          { length: Math.min(Number(total), 50) },
+          (_, i) => total - 1n - BigInt(i)
+        )
+      : [];
 
   const { data: uriResults } = useTokenURIs(tokenIds);
   const tokenURIs = (uriResults ?? []).map((r) =>
