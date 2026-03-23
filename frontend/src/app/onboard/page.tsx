@@ -653,28 +653,39 @@ export default function OnboardPage() {
 
     const detect = async () => {
       try {
-        // 1. On-chain check
-        const onChain = Boolean(await publicClient.readContract({
-          address: LEMON_AGENT_ADDRESS,
-          abi: lemonAgentAbi,
-          functionName: "isRegistered",
-          args: [walletAddress],
-        }));
-
-        if (!onChain) {
-          setResumeCheck("done"); // Not registered — show normal form
-          return;
-        }
-
-        // 2. Registered on-chain — get server record
+        // 1) Check server record first (fast + resilient if RPC is flaky).
         let agentWallet: string | undefined;
+        let serverErc8004Id: string | undefined;
         const r = await fetch(`${SERVER}/api/agents/${walletAddress}`).catch(() => null);
         if (r?.ok) {
           const ag = await r.json().catch(() => ({}));
           agentWallet = ag.agent_wallet;
+          serverErc8004Id = ag.erc8004_agent_id;
         }
 
-        // 3. If server doesn't know yet, trigger sync
+        // 2) On-chain check (best source of truth, but don't fail hard on RPC issues).
+        let onChain = false;
+        try {
+          onChain = Boolean(await publicClient.readContract({
+            address: LEMON_AGENT_ADDRESS,
+            abi: lemonAgentAbi,
+            functionName: "isRegistered",
+            args: [walletAddress],
+          }));
+        } catch {
+          // RPC may briefly fail; if server already has an agent record, treat as resumed.
+          onChain = Boolean(agentWallet);
+        }
+
+        if (!onChain && !agentWallet) {
+          setResumeCheck("done"); // Fresh user — show normal form
+          return;
+        }
+
+        // Already registered somewhere (chain or server) — never send back to step 1.
+        setIsResumed(true);
+
+        // 3) If server doesn't know yet, trigger sync
         if (!agentWallet) {
           try {
             await fetch(`${SERVER}/api/agents/register`, {
@@ -692,7 +703,7 @@ export default function OnboardPage() {
 
         if (agentWallet) setAgentWalletAddress(agentWallet);
 
-        // 4. Check CELO balance on agent wallet
+        // 4) Check CELO balance on agent wallet
         const MIN_CELO = parseUnits("0.04", 18);
         let hasEnoughCelo = false;
         if (agentWallet) {
@@ -704,12 +715,19 @@ export default function OnboardPage() {
 
         if (!hasEnoughCelo) {
           setFundStep("celo");
-          setIsResumed(true);
           setResumeCheck("done");
           return;
         }
 
-        // 5. Fully onboarded — redirect to dashboard
+        // 5) Gas is funded. If identity not linked yet, continue from identity step.
+        const identityLinked = !!(serverErc8004Id && serverErc8004Id !== "0");
+        if (!identityLinked) {
+          setFundStep("identity");
+          setResumeCheck("done");
+          return;
+        }
+
+        // 6) Fully onboarded — redirect to dashboard
         router.replace("/dashboard");
       } catch {
         setResumeCheck("done"); // Something went wrong — fall through to form
